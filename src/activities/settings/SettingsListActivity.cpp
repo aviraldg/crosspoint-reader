@@ -1,6 +1,7 @@
 #include "SettingsListActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <Logging.h>
 #include <Memory.h>
 
@@ -51,7 +52,9 @@ void SettingsListActivity::rebuildRows() {
   for (size_t i = 0; i < SETTINGS_SECTION_COUNT; ++i) {
     auto& item = rowItems_[i];
     item.label = I18N.get(SETTINGS_SECTION_TITLES[i]);
-    item.icon = fui::bitmapFromIcon(*SECTION_ICONS[i]);
+    if (HalDisplay::DISPLAY_HEIGHT > 240) {
+      item.icon = fui::bitmapFromIcon(*SECTION_ICONS[i]);
+    }
     item.actionValue = static_cast<int16_t>(i);
   }
 }
@@ -73,7 +76,11 @@ void SettingsListActivity::buildScreen(UiScreen& screen) {
   const int16_t textHeight = static_cast<int16_t>(screen.target().lineHeight(theme.bodyText.font) +
                                                   screen.target().lineHeight(theme.smallText.font));
   const int16_t paddingY = mappedInput.hasTouch() ? theme.listTouchRowPaddingY : theme.listRowPaddingY;
-  props.rowHeight = static_cast<int16_t>(std::max<int16_t>(textHeight, ICON_SIZE) + 2 * paddingY);
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    props.rowHeight = static_cast<int16_t>(metrics.listRowHeight);
+  } else {
+    props.rowHeight = static_cast<int16_t>(std::max<int16_t>(textHeight, ICON_SIZE) + 2 * paddingY);
+  }
   syncListViewport(screen, props);
   screen.list(props);
 }

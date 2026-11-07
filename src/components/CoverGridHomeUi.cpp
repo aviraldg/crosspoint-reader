@@ -283,9 +283,14 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 }
 
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
-  static constexpr const uint8_t* ICONS[] = {FolderIcon, LibraryIcon, BlocksIcon, TransferIcon, Settings2Icon};
-  int count = 0;
-  for (int i = 0; i < 5; ++i) {
+  static constexpr const uint8_t* ICONS[] = {
+      FolderIcon, LibraryIcon, BlocksIcon,
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
+      TransferIcon,
+#endif
+      Settings2Icon,
+  };
+  for (size_t i = 0; i < std::size(ICONS); ++i) {
     if (i == 2 && slotTab == SlotTab::NONE) continue;
     auto& tab = tabItems[count];
     tab.value = books->size() + count;
