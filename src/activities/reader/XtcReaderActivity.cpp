@@ -59,7 +59,7 @@ bool XtcReaderActivity::handleFormatInput() {
   return false;
 }
 
-void XtcReaderActivity::applyInitialOrientation() { renderer.setOrientation(GfxRenderer::Orientation::Portrait); }
+void XtcReaderActivity::applyInitialOrientation() { renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION); }
 
 void XtcReaderActivity::renderBook() {
   if (!xtc) {

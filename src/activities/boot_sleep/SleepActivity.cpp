@@ -719,7 +719,7 @@ void SleepActivity::onEnter() {
     }
     drawSleepPopupPreservingFrame(renderer);
     if (APP_STATE.lastSleepFromReader) {
-      renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+      renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
     }
     releaseSdFontCachesForDecode(renderer);
     if (sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::COVER_TRANSPARENT) {
@@ -732,7 +732,7 @@ void SleepActivity::onEnter() {
   if (APP_STATE.lastSleepFromReader) {
     ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
-    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+    renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
   } else {
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
