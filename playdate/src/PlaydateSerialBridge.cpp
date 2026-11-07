@@ -82,7 +82,7 @@ void reloadAfterWrite(const std::string& path) {
   } else if (path == "/.crosspoint/wifi.json") {
     WIFI_STORE.loadFromFile();
   } else if (path.rfind("/.crosspoint/plugins/", 0) == 0 || path.rfind("/plugins/", 0) == 0 ||
-             path.rfind("/.crosspoint/.", 0) == 0 || path == "/.crosspoint/readest-account.json") {
+             path.rfind("/.plugins/", 0) == 0) {
     if (!SETTINGS.pluginsEnabled) {
       SETTINGS.pluginsEnabled = 1;
       SETTINGS.saveToFile();

@@ -1187,14 +1187,13 @@ body.web-ui  {
   </header>
 
   <main class="page-content">
-    <!-- Connection Onboarding / Quick Actions Card -->
+    <!-- Connection Onboarding Card -->
     <div class="card pd-help-card" id="onboardingCard">
       <h2 style="margin-top:0;">Playdate Web Plugins &amp; File Hub</h2>
       <p style="margin:6px 0;">
-        Run all CrossPoint web plugins (including <b>Readest</b> sign-in &amp; KOReader progress sync,
-        <b>Plugin Hub</b>, <b>Wallabag</b>, <b>Readeck</b>, and more) directly in your browser:
+        Manage CrossPoint web plugins, files, settings, and fonts directly in your browser:
       </p>
-      <ol style="margin:8px 0 12px 20px;line-height:1.5;">
+      <ol style="margin:8px 0 4px 20px;line-height:1.5;">
         <li>
           <b>Live USB Serial Mode (Recommended):</b> Open CrossPoint on your Playdate, plug it into your computer via USB, and click
           <b>&#9889; Connect USB Serial (Live)</b> above. All changes apply immediately without rebooting!
@@ -1204,15 +1203,6 @@ body.web-ui  {
           <b>&#128193; Open Playdate Data Folder</b>, and select your mounted <code>PLAYDATE</code> drive (or <code>Data</code> folder).
         </li>
       </ol>
-      <div class="pd-quick-row">
-        <span style="font-size:0.88rem;color:var(--label-color);">Quick Bootstrap (if not installed on device yet):</span>
-        <button type="button" class="btn-small btn-add" onclick="bootstrapCatalogPlugin('readest')">
-          Install / Repair Readest Plugin
-        </button>
-        <button type="button" class="btn-small btn-add" onclick="bootstrapCatalogPlugin('pluginhub')">
-          Install / Repair Plugin Hub
-        </button>
-      </div>
     </div>
 
     <!-- TAB 1: PLUGINS (/plugins) -->
@@ -1220,8 +1210,7 @@ body.web-ui  {
       <div id="plugin-container"></div>
       <div class="card" id="empty-state" hidden>
         <p class="empty-state" id="empty-state-msg">
-          Connect your Playdate above to load installed web plugins, or click
-          <b>Install / Repair Readest Plugin</b> / <b>Install / Repair Plugin Hub</b> to install them directly.
+          Connect your Playdate above to load installed web plugins.
         </p>
       </div>
     </section>
@@ -2792,44 +2781,6 @@ async function loadPlugins(mount, beforeLoad) {
       }
     }
 
-    async function bootstrapCatalogPlugin(pluginId) {
-      if (!isConnected()) {
-        await showWebAlert("Please connect your Playdate first (via USB Serial or Data Folder).");
-        return;
-      }
-      const CATALOG_PLUGINS = {
-        readest: {
-          name: "readest",
-          base: "https://raw.githubusercontent.com/crosspoint-reader/crosspoint-plugin-hub/main/release-assets/readest/0.12.20/",
-          files: ["manifest.json", "device.json", "plugin.js", "README.md"]
-        },
-        pluginhub: {
-          name: "pluginhub",
-          base: "https://raw.githubusercontent.com/crosspoint-reader/crosspoint-plugin-hub/v0.1.16/",
-          files: ["manifest.json", "device.json", "plugin.js", "README.md", "DETAILS.md"]
-        }
-      };
-      const p = CATALOG_PLUGINS[pluginId];
-      if (!p) return;
-      try {
-        showWebToast(`Installing ${p.name} to Playdate…`, false);
-        const dir = `/.crosspoint/plugins/${p.name}`;
-        await fetch("/mkdir", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: "path=" + encodeURIComponent(dir)
-        });
-        for (const f of p.files) {
-          const res = await CrossPoint.fetchToSd("pluginhub", p.base + f, `${dir}/${f}`, {});
-          if (res.error) throw new Error(res.error);
-        }
-        showWebToast(`Installed ${p.name}! Loading plugins…`, false);
-        await switchTab("plugins");
-      } catch (e) {
-        showWebToast(`Failed to install ${p.name}: ${e.message || e}`, true);
-      }
-    }
-
     async function switchTab(tab) {
       currentTab = tab;
       document.querySelectorAll(".nav-links a[data-tab]").forEach(a => {
@@ -2862,7 +2813,7 @@ async function loadPlugins(mount, beforeLoad) {
       } else if (host.children.length === 0) {
         emptyMsg.innerHTML =
           "No web plugins are installed in <code>/.crosspoint/plugins</code> yet. " +
-          "Use the <b>Install / Repair Readest Plugin</b> or <b>Install / Repair Plugin Hub</b> buttons above!";
+          "Install plugins from <b>Plugins &rarr; Plugin Hub</b> on your Playdate, then click Refresh.";
         empty.hidden = false;
       }
     }
