@@ -8,10 +8,26 @@ Access (`window.showDirectoryPicker`) virtual `/api/*` server and debug logger.
 
 import base64
 import os
+import subprocess
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HTML_DIR = os.path.join(REPO_ROOT, "src", "network", "html")
 OUT_PATH = os.path.join(os.path.dirname(__file__), "playdate_web_hub.html")
+
+
+def get_git_short_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=REPO_ROOT,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            or "unknown"
+        )
+    except Exception:
+        return "unknown"
 
 
 def read_text(rel_path: str) -> str:
@@ -20,6 +36,8 @@ def read_text(rel_path: str) -> str:
 
 
 def main():
+    git_sha = get_git_short_sha()
+    web_hub_version = f"2.0.0-playdate-{git_sha}"
     web_css = read_text("assets/web.css")
     icon_svg = read_text("assets/crosspoint-icon.svg")
     icon_data_uri = "data:image/svg+xml;base64," + base64.b64encode(icon_svg.encode("utf-8")).decode("ascii")
@@ -533,6 +551,7 @@ def main():
     for (let i = 0; i < 32; i++) DEFAULT_DEVICE_SECRET[i] = (0x50 + i * 17) & 0xFF;
 
     const FIRMWARE_FAMILY = "crosspoint";
+    const WEB_HUB_VERSION = "{web_hub_version}";
     const PLUGIN_API_VERSION = 1;
     const PLUGIN_CAPABILITIES =
       "catalog.lists,catalog.notices,catalog.bundle_install,catalog.version_tracking," +
@@ -751,7 +770,10 @@ def main():
           const {{ ok, rest }} = await this._cmd("PING", 3000);
           if (!ok) return false;
           const doc = JSON.parse(rest);
-          if (doc.version) this.targetDescription = `Playdate (${{doc.version}}) via Live USB Serial`;
+          if (doc.version) {{
+            this.deviceVersion = doc.version;
+            this.targetDescription = `Playdate (${{doc.version}}) via Live USB Serial`;
+          }}
           hubLog("info", "serial", "PING succeeded", doc);
           return !!doc.ok;
         }} catch (e) {{
@@ -823,33 +845,37 @@ def main():
       }}
 
       async writeFile(vpath, dataBytes) {{
-        vpath = normalizeVPath(vpath);
-        const bytes = dataBytes instanceof Uint8Array ? dataBytes : new Uint8Array(dataBytes);
-        const openRes = await this._cmd("WOPEN " + vpath);
-        if (!openRes.ok) throw new Error("Serial WOPEN failed: " + openRes.rest);
-        const step = 120;
-        const flushThreshold = bytes.length <= 2048 ? step : 240;
-        let sinceFlush = 0;
-        const enc = new TextEncoder();
-        for (let i = 0; i < bytes.length; i += step) {{
-          const slice = bytes.subarray(i, i + step);
-          const b64 = uint8ToBase64(slice);
-          const sendChunk = async () => {{
-            if (isVerboseSerialEnabled()) hubLog("debug", "serial-tx", `!CP WDATA (${{slice.length}}B)`);
-            await this.writer.write(enc.encode("msg !CP WDATA " + b64 + "\\r\\n"));
-          }};
-          const next = this.mutex.then(sendChunk, sendChunk);
-          this.mutex = next.then(() => undefined, () => undefined);
-          await next;
-          sinceFlush += slice.length;
-          if (sinceFlush >= flushThreshold) {{
-            const fl = await this._cmd("WFLUSH", 8000);
-            if (!fl.ok) throw new Error("Serial WFLUSH failed: " + fl.rest);
-            sinceFlush = 0;
+        const runWrite = async () => {{
+          vpath = normalizeVPath(vpath);
+          const bytes = dataBytes instanceof Uint8Array ? dataBytes : new Uint8Array(dataBytes);
+          const openRes = await this._cmd("WOPEN " + vpath);
+          if (!openRes.ok) throw new Error("Serial WOPEN failed: " + openRes.rest);
+          const step = 120;
+          const flushThreshold = bytes.length <= 2048 ? step : 240;
+          let sinceFlush = 0;
+          const enc = new TextEncoder();
+          for (let i = 0; i < bytes.length; i += step) {{
+            const slice = bytes.subarray(i, i + step);
+            const b64 = uint8ToBase64(slice);
+            const sendChunk = async () => {{
+              if (isVerboseSerialEnabled()) hubLog("debug", "serial-tx", `!CP WDATA (${{slice.length}}B)`);
+              await this.writer.write(enc.encode("msg !CP WDATA " + b64 + "\\r\\n"));
+            }};
+            const next = this.mutex.then(sendChunk, sendChunk);
+            this.mutex = next.then(() => undefined, () => undefined);
+            await next;
+            sinceFlush += slice.length;
+            if (sinceFlush >= flushThreshold) {{
+              const fl = await this._cmd("WFLUSH", 8000);
+              if (!fl.ok) throw new Error("Serial WFLUSH failed: " + fl.rest);
+              sinceFlush = 0;
+            }}
           }}
-        }}
-        const cl = await this._cmd("WCLOSE", 8000);
-        if (!cl.ok) throw new Error("Serial WCLOSE failed: " + cl.rest);
+          const cl = await this._cmd("WCLOSE", 8000);
+          if (!cl.ok) throw new Error("Serial WCLOSE failed: " + cl.rest);
+        }};
+        this.writeMutex = (this.writeMutex || Promise.resolve()).then(runWrite, runWrite);
+        return this.writeMutex;
       }}
 
       async mkdir(vpath) {{
@@ -871,20 +897,24 @@ def main():
       }}
 
       async relayHttp(reqObj) {{
-        const reqPath = "/.crosspoint/.serial-relay-req.json";
-        hubLog("info", "serial-relay", `Relaying ${{reqObj.method || "GET"}} ${{reqObj.url}} via Playdate Wi-Fi…`);
-        await this.writeFile(reqPath, new TextEncoder().encode(JSON.stringify(reqObj)));
-        const {{ ok, rest, dataChunks }} = await this._cmd("RELAY " + reqPath, 35000);
-        if (!ok) throw new Error(rest || "Serial HTTP relay failed");
-        const meta = JSON.parse(rest || "{{}}");
-        const b64 = dataChunks.join("");
-        const bodyBytes = b64 ? base64ToUint8(b64) : new Uint8Array(0);
-        hubLog("info", "serial-relay", `Relay completed: HTTP ${{meta.status}} (${{bodyBytes.length || meta.bytes || 0}} bytes)`);
-        return {{
-          status: Number(meta.status || 200),
-          bytes: Number(meta.bytes || bodyBytes.length),
-          bodyBytes
+        const runRelay = async () => {{
+          const reqPath = "/.crosspoint/.serial-relay-req.json";
+          hubLog("info", "serial-relay", `Relaying ${{reqObj.method || "GET"}} ${{reqObj.url}} via Playdate Wi-Fi…`);
+          await this.writeFile(reqPath, new TextEncoder().encode(JSON.stringify(reqObj)));
+          const {{ ok, rest, dataChunks }} = await this._cmd("RELAY " + reqPath, 35000);
+          if (!ok) throw new Error(rest || "Serial HTTP relay failed");
+          const meta = JSON.parse(rest || "{{}}");
+          const b64 = dataChunks.join("");
+          const bodyBytes = b64 ? base64ToUint8(b64) : new Uint8Array(0);
+          hubLog("info", "serial-relay", `Relay completed: HTTP ${{meta.status}} (${{bodyBytes.length || meta.bytes || 0}} bytes)`);
+          return {{
+            status: Number(meta.status || 200),
+            bytes: Number(meta.bytes || bodyBytes.length),
+            bodyBytes
+          }};
         }};
+        this.relayMutex = (this.relayMutex || Promise.resolve()).then(runRelay, runRelay);
+        return this.relayMutex;
       }}
     }}
 
@@ -1264,7 +1294,8 @@ def main():
 
       if (route === "/api/status" && method === "GET") {{
         const resp = {{
-          version: "1.2.0-playdate",
+          version: (activeBackend && activeBackend.deviceVersion) ? activeBackend.deviceVersion : WEB_HUB_VERSION,
+          hubVersion: WEB_HUB_VERSION,
           firmwareFamily: FIRMWARE_FAMILY,
           pluginApi: PLUGIN_API_VERSION,
           pluginCapabilities: PLUGIN_CAPABILITIES,
@@ -2096,7 +2127,7 @@ def main():
       await reloadFontsTab();
     }}
 
-    hubLog("info", "startup", `Web Hub initialized (origin=${{window.location.origin}}, protocol=${{window.location.protocol}}, serial=${{"serial" in navigator}}, dirPicker=${{"showDirectoryPicker" in window}})`);
+    hubLog("info", "startup", `Web Hub ${{WEB_HUB_VERSION}} initialized (origin=${{window.location.origin}}, protocol=${{window.location.protocol}}, serial=${{"serial" in navigator}}, dirPicker=${{"showDirectoryPicker" in window}})`);
   </script>
 </body>
 </html>

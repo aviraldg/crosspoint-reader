@@ -246,6 +246,19 @@ set(ALL_CROSSPOINT_INCLUDES
   "${animatedgif_SOURCE_DIR}/src"
 )
 
+if(NOT DEFINED CROSSPOINT_GIT_SHA OR "${CROSSPOINT_GIT_SHA}" STREQUAL "")
+  execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY "${REPO_ROOT}"
+    OUTPUT_VARIABLE CROSSPOINT_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if("${CROSSPOINT_GIT_SHA}" STREQUAL "")
+    set(CROSSPOINT_GIT_SHA "unknown")
+  endif()
+endif()
+
 set(ALL_CROSSPOINT_DEFINES
   CROSSPOINT_VERSION="2.0.0-playdate"
   CROSSPOINT_GIT_BRANCH="feat/playdate-port"
@@ -270,6 +283,14 @@ set(ALL_CROSSPOINT_DEFINES
   XML_CONTEXT_BYTES=0
   MAX_WIDTH=3072
   PNG_MAX_BUFFERED_PIXELS=16416
+)
+
+set_source_files_properties(
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/PlaydateSerialBridge.cpp"
+  "${REPO_ROOT}/src/activities/settings/AboutActivity.cpp"
+  "${REPO_ROOT}/src/activities/settings/SettingsListActivity.cpp"
+  "${REPO_ROOT}/src/activities/boot_sleep/BootActivity.cpp"
+  PROPERTIES COMPILE_OPTIONS "-Wno-builtin-macro-redefined;-UCROSSPOINT_VERSION;-DCROSSPOINT_VERSION=\"2.0.0-playdate-${CROSSPOINT_GIT_SHA}\""
 )
 
 if (TOOLCHAIN STREQUAL "armgcc")
