@@ -39,6 +39,7 @@ struct RequestCallbackState {
   std::string host;
   std::string path;
   std::string headerBlob;
+  std::string payloadBlob;
   std::vector<uint8_t> readBuf;
   std::vector<std::pair<std::string, std::string>> headers;
   size_t contentLength = 0;
@@ -47,6 +48,7 @@ struct RequestCallbackState {
   volatile bool bodyAvailable = false;
   volatile bool requestComplete = false;
   volatile bool connectionClosed = false;
+  volatile bool retired = false;
 };
 
 void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) {
@@ -54,7 +56,7 @@ void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) 
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
-  if (!state || state->headers.size() >= 64) return;
+  if (!state || state->retired || state->headers.size() >= 64) return;
 
   std::string name(key);
   std::transform(name.begin(), name.end(), name.begin(),
@@ -75,7 +77,7 @@ void onHeadersRead(HTTPConnection* conn) {
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
-  if (state) state->headersRead = true;
+  if (state && !state->retired) state->headersRead = true;
 }
 
 void onResponse(HTTPConnection* conn) {
@@ -83,7 +85,7 @@ void onResponse(HTTPConnection* conn) {
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
-  if (state) {
+  if (state && !state->retired) {
     state->headersRead = true;
     state->bodyAvailable = true;
   }
@@ -163,6 +165,7 @@ bool ensureHostAccess(const std::string& host, uint16_t port, bool useSsl, uint3
 
 struct RetiredConnection {
   HTTPConnection* conn;
+  std::unique_ptr<RequestCallbackState> state;
   unsigned long closedAtMs;
 };
 
@@ -172,21 +175,20 @@ std::vector<RetiredConnection>& retiredConnections() {
 }
 
 void reapRetiredConnections(PlaydateAPI* pd, bool forceOldest = false) {
+  (void)forceOldest;
   if (!pd || !pd->network || !pd->network->http) return;
   auto& list = retiredConnections();
   const unsigned long now = millis();
   auto it = list.begin();
   while (it != list.end()) {
-    if (static_cast<int32_t>(now - it->closedAtMs) >= 10000) {
+    const bool closed = it->state && it->state->connectionClosed && it->state->requestComplete;
+    const int32_t ageMs = static_cast<int32_t>(now - it->closedAtMs);
+    if (closed && ageMs >= 30000) {
       pd->network->http->release(it->conn);
       it = list.erase(it);
     } else {
       ++it;
     }
-  }
-  if (forceOldest && list.size() > 8) {
-    pd->network->http->release(list.front().conn);
-    list.erase(list.begin());
   }
 }
 
@@ -347,36 +349,37 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     state->headerBlob += "Connection: close\r\n";
   }
 
+  if (payload && payloadLen > 0) {
+    state->payloadBlob.assign(reinterpret_cast<const char*>(payload), payloadLen);
+  }
+  const char* payloadPtr = state->payloadBlob.empty() ? nullptr : state->payloadBlob.data();
+  const size_t payloadSize = state->payloadBlob.size();
+
   const char* headersPtr = state->headerBlob.empty() ? nullptr : state->headerBlob.c_str();
   const size_t headersLen = state->headerBlob.size();
   const char* reqMethod = method ? method : "GET";
   PDNetErr err = NET_OK;
-  if (std::strcmp(reqMethod, "GET") == 0 && (!payload || payloadLen == 0)) {
+  if (std::strcmp(reqMethod, "GET") == 0 && payloadSize == 0) {
     err = pd->network->http->get(conn, state->path.c_str(), headersPtr, headersLen);
   } else if (std::strcmp(reqMethod, "POST") == 0) {
-    err = pd->network->http->post(conn, state->path.c_str(), headersPtr, headersLen,
-                                  reinterpret_cast<const char*>(payload), payloadLen);
+    err = pd->network->http->post(conn, state->path.c_str(), headersPtr, headersLen, payloadPtr, payloadSize);
   } else {
-    err = pd->network->http->query(conn, reqMethod, state->path.c_str(), headersPtr, headersLen,
-                                   reinterpret_cast<const char*>(payload), payloadLen);
+    err = pd->network->http->query(conn, reqMethod, state->path.c_str(), headersPtr, headersLen, payloadPtr, payloadSize);
   }
 
   auto cleanupConn = [&]() {
-    pd->network->http->setUserdata(conn, nullptr);
-    pd->network->http->setHeaderReceivedCallback(conn, nullptr);
-    pd->network->http->setHeadersReadCallback(conn, nullptr);
-    if (pd->network->http->setResponseCallback) {
-      pd->network->http->setResponseCallback(conn, nullptr);
+    if (state) {
+      state->retired = true;
+      state->readBuf.clear();
+      state->readBuf.shrink_to_fit();
+      state->headers.clear();
+      state->headers.shrink_to_fit();
     }
-    pd->network->http->setRequestCompleteCallback(conn, nullptr);
-    pd->network->http->setConnectionClosedCallback(conn, nullptr);
-    if (!state->connectionClosed) {
-      pd->network->http->close(conn);
-    }
-    // Defer release(conn) so any in-flight async close/completion event from Playdate's
-    // ESP32 Wi-Fi coprocessor on the next frame never touches a freed HTTPConnection.
-    retiredConnections().push_back(RetiredConnection{conn, millis()});
-    reapRetiredConnections(pd, /*forceOldest=*/true);
+    // Keep non-null static callbacks and `state` (host, path, headerBlob, payloadBlob)
+    // alive inside RetiredConnection until Playdate OS has finished all async timeout/close
+    // events for `conn`. Setting callbacks to nullptr or freeing `state` early causes
+    // Playdate OS to jump to NULL or read freed buffers when its 5s HTTP timer fires.
+    retiredConnections().push_back(RetiredConnection{conn, std::move(state), millis()});
   };
 
   if (err != NET_OK) {
