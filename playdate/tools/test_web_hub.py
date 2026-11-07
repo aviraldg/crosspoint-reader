@@ -194,9 +194,15 @@ function installMockWebSerial(files) {
       writeChunks.push(base64ToUint8(rest));
       return;
     }
+    if (cmd === "WCHUNK") {
+      writeChunks.push(base64ToUint8(rest));
+      const len = writeChunks.reduce((a, c) => a + c.length, 0);
+      sendBurst([`@CP OK ${JSON.stringify({ ok: true, written: len })}`]);
+      return;
+    }
     if (cmd === "WFLUSH") {
       const len = writeChunks.reduce((a, c) => a + c.length, 0);
-      sendBurst([`@CP OK ${JSON.stringify({ ok: true, bytes: len })}`]);
+      sendBurst([`@CP OK ${JSON.stringify({ ok: true, written: len })}`]);
       return;
     }
     if (cmd === "WCLOSE") {

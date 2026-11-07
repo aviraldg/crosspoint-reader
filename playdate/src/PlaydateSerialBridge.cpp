@@ -34,9 +34,37 @@ namespace {
 HalFile gWriteFile;
 std::string gWriteTargetPath;
 std::string gWriteTmpPath;
+std::vector<uint8_t> gWriteBuffer;
 size_t gWriteBytes = 0;
 bool gWriteError = false;
 bool gWriteOpen = false;
+bool gPendingRelay = false;
+std::string gPendingRelayReqPath;
+bool gSerialFastMode = false;
+unsigned long gLastSerialActivityMs = 0;
+
+constexpr size_t kWriteBufferFlushThreshold = 16 * 1024;
+
+void enterSerialFastMode() {
+  gLastSerialActivityMs = millis();
+  if (!gSerialFastMode) {
+    PlaydateAPI* pd = playdate_hal::pd();
+    if (pd && pd->display && pd->display->setRefreshRate) {
+      pd->display->setRefreshRate(0.0f);
+      gSerialFastMode = true;
+    }
+  }
+}
+
+void maybeExitSerialFastMode() {
+  if (!gSerialFastMode || gWriteOpen || gPendingRelay) return;
+  if (millis() - gLastSerialActivityMs <= 3000) return;
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (pd && pd->display && pd->display->setRefreshRate) {
+    pd->display->setRefreshRate(30.0f);
+  }
+  gSerialFastMode = false;
+}
 
 void sendLine(const char* kind, const std::string& json) {
   PlaydateAPI* pd = playdate_hal::pd();
@@ -54,6 +82,21 @@ void sendError(const char* message) {
   sendLine("ERR", out);
 }
 
+bool flushWriteBufferToDisk() {
+  if (gWriteBuffer.empty()) return true;
+  if (!gWriteFile.isOpen()) {
+    gWriteError = true;
+    return false;
+  }
+  const size_t n = gWriteBuffer.size();
+  if (gWriteFile.write(gWriteBuffer.data(), n) != n) {
+    gWriteError = true;
+    return false;
+  }
+  gWriteBuffer.clear();
+  return true;
+}
+
 void closeWriteState() {
   if (gWriteFile.isOpen()) {
     gWriteFile.close();
@@ -63,6 +106,7 @@ void closeWriteState() {
   }
   gWriteTargetPath.clear();
   gWriteTmpPath.clear();
+  gWriteBuffer.clear();
   gWriteBytes = 0;
   gWriteError = false;
   gWriteOpen = false;
@@ -234,11 +278,13 @@ void handleWriteOpen(const std::string& path) {
     sendError("open write failed");
     return;
   }
+  gWriteBuffer.clear();
+  gWriteBuffer.reserve(kWriteBufferFlushThreshold);
   gWriteOpen = true;
   sendLine("OK", "{\"ok\":true}");
 }
 
-void handleWriteData(const std::string& b64) {
+void appendWriteBytes(const std::string& b64) {
   if (!gWriteOpen || gWriteError || b64.empty()) {
     gWriteError = true;
     return;
@@ -252,12 +298,16 @@ void handleWriteData(const std::string& b64) {
     return;
   }
   if (olen > 0) {
-    if (gWriteFile.write(decoded, olen) != olen) {
-      gWriteError = true;
-      return;
-    }
+    gWriteBuffer.insert(gWriteBuffer.end(), decoded, decoded + olen);
     gWriteBytes += olen;
+    if (gWriteBuffer.size() >= kWriteBufferFlushThreshold) {
+      flushWriteBufferToDisk();
+    }
   }
+}
+
+void handleWriteData(const std::string& b64) {
+  appendWriteBytes(b64);
 }
 
 void handleWriteFlush() {
@@ -269,8 +319,13 @@ void handleWriteFlush() {
   sendLine(doc["ok"].as<bool>() ? "OK" : "ERR", out);
 }
 
+void handleWriteChunk(const std::string& b64) {
+  appendWriteBytes(b64);
+  handleWriteFlush();
+}
+
 void handleWriteClose() {
-  if (!gWriteOpen || gWriteError) {
+  if (!gWriteOpen || gWriteError || !flushWriteBufferToDisk()) {
     closeWriteState();
     sendError("write failed");
     return;
@@ -282,6 +337,7 @@ void handleWriteClose() {
   const size_t totalBytes = gWriteBytes;
   gWriteTargetPath.clear();
   gWriteTmpPath.clear();
+  gWriteBuffer.clear();
   gWriteBytes = 0;
   gWriteOpen = false;
   gWriteError = false;
@@ -337,9 +393,6 @@ void handleRename(const std::string& args) {
   }
   sendLine(ok ? "OK" : "ERR", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"rename failed\"}");
 }
-
-bool gPendingRelay = false;
-std::string gPendingRelayReqPath;
 
 void executePendingRelayOnFiber() {
   const std::string reqPath = gPendingRelayReqPath.empty() ? "/.crosspoint/.serial-relay-req.json" : gPendingRelayReqPath;
@@ -467,6 +520,7 @@ void onSerialMessage(const char* data) {
   if (!data) return;
   while (*data == ' ' || *data == '\t') ++data;
   if (std::strncmp(data, "!CP ", 4) != 0) return;
+  enterSerialFastMode();
   const char* p = data + 4;
   while (*p == ' ') ++p;
 
@@ -491,6 +545,8 @@ void onSerialMessage(const char* data) {
     handleWriteOpen(rest);
   } else if (cmd == "WDATA") {
     handleWriteData(rest);
+  } else if (cmd == "WCHUNK") {
+    handleWriteChunk(rest);
   } else if (cmd == "WFLUSH") {
     handleWriteFlush();
   } else if (cmd == "WCLOSE") {
@@ -520,7 +576,9 @@ void registerSerialBridge(PlaydateAPI* pd) {
 void pumpSerialBridge() {
   if (gPendingRelay) {
     executePendingRelayOnFiber();
+    gLastSerialActivityMs = millis();
   }
+  maybeExitSerialFastMode();
 }
 
 }  // namespace playdate_serial

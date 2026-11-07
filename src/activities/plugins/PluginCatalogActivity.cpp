@@ -1839,7 +1839,7 @@ void PluginCatalogActivity::buildAuthScreen(UiScreen& screen) {
   screen.target().text(screen.takeTop(lh, gap), authVerifyUrl.c_str(), centered);
   screen.target().text(screen.takeTop(screen.target().lineHeight(code.font), gap), authUserCode.c_str(), code);
 
-  constexpr int16_t qrSize = 180;
+  constexpr int16_t qrSize = HalDisplay::DISPLAY_HEIGHT <= 240 ? 96 : 180;
   const fui::Rect band = screen.takeTop(qrSize, gap);
   authQrRect = fui::Rect{static_cast<int16_t>(band.x + (band.width - qrSize) / 2), band.y, qrSize, qrSize};
 
