@@ -29,3 +29,11 @@ inline esp_err_t esp_wifi_get_ps(wifi_ps_type_t* type) {
   if (type) *type = WIFI_PS_NONE;
   return ESP_OK;
 }
+
+inline esp_err_t esp_wifi_stop() { return ESP_OK; }
+
+inline esp_err_t esp_wifi_start() { return ESP_OK; }
+
+inline esp_err_t esp_wifi_disconnect() { return ESP_OK; }
+
+inline esp_err_t esp_wifi_deinit() { return ESP_OK; }

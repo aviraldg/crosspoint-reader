@@ -23,7 +23,9 @@
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "library/LibraryListActivity.h"
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
 #include "network/CrossPointWebServerActivity.h"
+#endif
 #include "network/UsbDriveActivity.h"
 #include "plugins/PluginCatalogActivity.h"
 #include "reader/ReaderActivity.h"
@@ -289,13 +291,21 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
 }
 
 void ActivityManager::goToFileTransfer() {
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
+#else
+  LOG_ERR("ACT", "File transfer requested in a build without local transfer capability");
+#endif
 }
 
 void ActivityManager::goToJoinNetwork() {
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
   // Post heap-defrag reboot: enter the web-server activity straight in Join
   // Network mode (skips mode selection, does not reboot again).
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput, /*startInJoinNetwork=*/true));
+#else
+  LOG_ERR("ACT", "Join network requested in a build without local transfer capability");
+#endif
 }
 
 void ActivityManager::goToUsbDrive() {

@@ -1,0 +1,6 @@
+name=CrossPoint Reader
+author=CrossPoint Contributors
+description=Full-featured EPUB, XTC, and TXT e-book reader for Playdate
+bundleID=com.crosspoint.reader
+version=2.0.0
+buildNumber=1

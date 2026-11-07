@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+InputManager::InputManager() = default;
+
 HalGPIO gpio;
 
 namespace {

@@ -1,13 +1,90 @@
 #pragma once
 
+#ifndef CROSSPOINT_PLAYDATE
+#define CROSSPOINT_PLAYDATE 1
+#endif
+#ifndef CROSSPOINT_CUSTOM_DISPLAY_HAL
+#define CROSSPOINT_CUSTOM_DISPLAY_HAL 1
+#endif
+#ifndef CROSSPOINT_DISPLAY_WIDTH
+#define CROSSPOINT_DISPLAY_WIDTH 400
+#endif
+#ifndef CROSSPOINT_DISPLAY_HEIGHT
+#define CROSSPOINT_DISPLAY_HEIGHT 240
+#endif
+#ifndef CROSSPOINT_DEFAULT_UI_ORIENTATION
+#define CROSSPOINT_DEFAULT_UI_ORIENTATION GfxRenderer::LandscapeCounterClockwise
+#endif
+#ifndef CROSSPOINT_DEFAULT_UI_LANDSCAPE_CCW
+#define CROSSPOINT_DEFAULT_UI_LANDSCAPE_CCW 1
+#endif
+#ifndef CROSSPOINT_COOPERATIVE_RENDER
+#define CROSSPOINT_COOPERATIVE_RENDER 1
+#endif
+#ifndef CROSSPOINT_CAP_LOCAL_TRANSFER
+#define CROSSPOINT_CAP_LOCAL_TRANSFER 0
+#endif
+#ifndef CROSSPOINT_CAP_OTA
+#define CROSSPOINT_CAP_OTA 0
+#endif
+#ifndef FREEINK_CAP_BLE_HID_HOST
+#define FREEINK_CAP_BLE_HID_HOST 0
+#endif
+#ifndef FREEINK_CAP_USB_MSC
+#define FREEINK_CAP_USB_MSC 0
+#endif
+#ifndef FREEINK_DEVICE_X4
+#define FREEINK_DEVICE_X4 1
+#endif
+#ifndef ARDUINOJSON_ENABLE_ARDUINO_STRING
+#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
+#endif
+#ifndef ARDUINOJSON_ENABLE_ARDUINO_STREAM
+#define ARDUINOJSON_ENABLE_ARDUINO_STREAM 1
+#endif
+#ifndef ARDUINOJSON_ENABLE_ARDUINO_PRINT
+#define ARDUINOJSON_ENABLE_ARDUINO_PRINT 1
+#endif
+
 #include <algorithm>
+#include <cassert>
 #include <cmath>
-#include <cstdbool>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <mutex>
+
+#if !defined(_GLIBCXX_HAS_GTHREADS)
+namespace std {
+class mutex {
+ public:
+  constexpr mutex() noexcept = default;
+  ~mutex() = default;
+  mutex(const mutex&) = delete;
+  mutex& operator=(const mutex&) = delete;
+  void lock() noexcept {}
+  bool try_lock() noexcept { return true; }
+  void unlock() noexcept {}
+};
+class recursive_mutex {
+ public:
+  constexpr recursive_mutex() noexcept = default;
+  ~recursive_mutex() = default;
+  recursive_mutex(const recursive_mutex&) = delete;
+  recursive_mutex& operator=(const recursive_mutex&) = delete;
+  void lock() noexcept {}
+  bool try_lock() noexcept { return true; }
+  void unlock() noexcept {}
+};
+}  // namespace std
+#endif
+
+using std::ptrdiff_t;
+using std::size_t;
+using std::time_t;
 
 #include "HardwareSerial.h"
 #include "Print.h"
@@ -16,6 +93,10 @@
 
 #ifndef PROGMEM
 #define PROGMEM
+#endif
+
+#ifndef RTC_NOINIT_ATTR
+#define RTC_NOINIT_ATTR
 #endif
 
 #ifndef PGM_P

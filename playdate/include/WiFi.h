@@ -18,6 +18,7 @@ enum wl_status_t {
 
 enum wifi_mode_t {
   WIFI_OFF = 0,
+  WIFI_MODE_NULL = 0,
   WIFI_STA = 1,
   WIFI_AP = 2,
   WIFI_AP_STA = 3
@@ -45,6 +46,12 @@ class IPAddress {
 
   uint8_t operator[](int index) const { return (index >= 0 && index < 4) ? octets_[index] : 0; }
   uint8_t& operator[](int index) { return octets_[index]; }
+
+  constexpr bool operator==(const IPAddress& other) const {
+    return octets_[0] == other.octets_[0] && octets_[1] == other.octets_[1] && octets_[2] == other.octets_[2] &&
+           octets_[3] == other.octets_[3];
+  }
+  constexpr bool operator!=(const IPAddress& other) const { return !(*this == other); }
 
   String toString() const {
     char buf[16];

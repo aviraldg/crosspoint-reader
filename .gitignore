@@ -33,3 +33,7 @@ lib/EpdFont/scripts/output/
 sdkconfig.sticky
 sdkconfig.x4pro
 flake.*
+build_tests/
+playdate/build*/
+playdate/Source/pdex.*
+playdate/*.pdx/

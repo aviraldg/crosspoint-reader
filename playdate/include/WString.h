@@ -15,7 +15,7 @@ class String {
   String() = default;
   String(const char* cstr) : s_(cstr ? cstr : "") {}
   String(const char* cstr, unsigned int length) : s_(cstr ? std::string(cstr, length) : std::string()) {}
-  String(const std::string& str) : s_(str) {}
+  explicit String(const std::string& str) : s_(str) {}
   String(const String&) = default;
   String(String&&) noexcept = default;
   explicit String(char c) : s_(1, c) {}

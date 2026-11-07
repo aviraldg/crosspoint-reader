@@ -3,6 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 
+using std::ptrdiff_t;
+using std::size_t;
+
 using TickType_t = uint32_t;
 using BaseType_t = int32_t;
 using UBaseType_t = uint32_t;
@@ -12,6 +15,10 @@ using SemaphoreHandle_t = void*;
 
 struct StaticTask_t {
   uint8_t dummy[64];
+};
+
+struct StaticSemaphore_t {
+  uint8_t dummy[16];
 };
 
 #ifndef pdTRUE
@@ -52,4 +59,12 @@ struct portMUX_TYPE {
 
 #ifndef portEXIT_CRITICAL
 #define portEXIT_CRITICAL(mux) ((void)(mux))
+#endif
+
+#ifndef taskENTER_CRITICAL
+#define taskENTER_CRITICAL(mux) portENTER_CRITICAL(mux)
+#endif
+
+#ifndef taskEXIT_CRITICAL
+#define taskEXIT_CRITICAL(mux) portEXIT_CRITICAL(mux)
 #endif

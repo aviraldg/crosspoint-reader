@@ -38,3 +38,24 @@ inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t taskCode, const char* n
 }
 
 inline void vTaskDelete(TaskHandle_t taskToDelete) { (void)taskToDelete; }
+
+enum eNotifyAction {
+  eNoAction = 0,
+  eSetBits,
+  eIncrement,
+  eSetValueWithOverwrite,
+  eSetValueWithoutOverwrite
+};
+
+inline BaseType_t xTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, eNotifyAction eAction) {
+  (void)xTaskToNotify;
+  (void)ulValue;
+  (void)eAction;
+  return pdPASS;
+}
+
+inline uint32_t ulTaskNotifyTake(BaseType_t xClearCountOnExit, TickType_t xTicksToWait) {
+  (void)xClearCountOnExit;
+  (void)xTicksToWait;
+  return 1;
+}
