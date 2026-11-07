@@ -40,3 +40,4 @@ build_tests/
 playdate/build*/
 playdate/Source/pdex.*
 playdate/*.pdx/
+playdate/SimulatorDisk/

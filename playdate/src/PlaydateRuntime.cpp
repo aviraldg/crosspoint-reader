@@ -17,6 +17,7 @@
 #include <Logging.h>
 #include <MinizConfig.h>
 #include <PlaydateRuntime.h>
+#include <PlaydateSerialBridge.h>
 #include <TrustedTime.h>
 #include <builtinFonts/all.h>
 
@@ -332,6 +333,7 @@ bool gYielded = false;
 void simulatorFiberEntry() {
   for (;;) {
     gYielded = false;
+    playdate_serial::pumpSerialBridge();
     mappedInputManager.update();
     activityManager.loop();
     gInFiber = false;
@@ -371,6 +373,7 @@ __attribute__((naked)) void armSwapContext(ArmFiberContext* from, const ArmFiber
 void deviceFiberEntry() {
   for (;;) {
     gYielded = false;
+    playdate_serial::pumpSerialBridge();
     mappedInputManager.update();
     activityManager.loop();
     gInFiber = false;
@@ -514,6 +517,7 @@ void initCrossPointOnPlaydate(PlaydateAPI* pd) {
 
   seedSampleBooksIfNeeded();
   registerSystemMenuItems(pd);
+  playdate_serial::registerSerialBridge(pd);
 
   activityManager.begin();
   if (!APP_STATE.openEpubPath.empty() && Storage.exists(APP_STATE.openEpubPath.c_str())) {
