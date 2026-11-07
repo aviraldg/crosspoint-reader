@@ -31,6 +31,8 @@ class EspClass {
   uint32_t getMaxAllocHeap() const;
   const char* getSdkVersion() const;
   const char* getChipModel() const;
+  uint8_t getChipRevision() const { return 1; }
+  uint64_t getFlashChipSize() const { return 4096ULL * 1024ULL * 1024ULL; }
   uint32_t getCpuFreqMHz() const { return 168; }
 };
 

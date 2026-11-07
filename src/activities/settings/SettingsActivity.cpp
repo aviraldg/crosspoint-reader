@@ -15,7 +15,9 @@
 #include <cstring>
 
 #include "AboutActivity.h"
+#if FREEINK_CAP_BLE_HID_HOST
 #include "BleSettingsActivity.h"
+#endif
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "ClockSettingsActivity.h"
@@ -27,9 +29,11 @@
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
+#if CROSSPOINT_CAP_OTA
 #include "OtaUpdateActivity.h"
-#include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
+#endif
+#include "SdCardFontSystem.h"
 #include "SettingsList.h"
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
@@ -444,12 +448,14 @@ void SettingsActivity::toggleSelectedSetting() {
         break;
       }
       case SettingAction::Bluetooth: {
+#if FREEINK_CAP_BLE_HID_HOST
         auto activity = makeUniqueNoThrow<BleSettingsActivity>(renderer, mappedInput);
         if (!activity) {
           LOG_ERR("SETTINGS", "OOM: BleSettingsActivity");
           return;
         }
         startActivityForResult(std::move(activity), resultHandler);
+#endif
         break;
       }
       case SettingAction::ClearCache:
@@ -469,10 +475,14 @@ void SettingsActivity::toggleSelectedSetting() {
         break;
       }
       case SettingAction::CheckForUpdates:
+#if CROSSPOINT_CAP_OTA
         startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
+#endif
         break;
       case SettingAction::SdFirmwareUpdate:
+#if CROSSPOINT_CAP_OTA
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
+#endif
         break;
       case SettingAction::DownloadFonts:
         startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),

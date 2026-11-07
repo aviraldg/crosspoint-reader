@@ -7,8 +7,14 @@ using oflag_t = uint8_t;
 #ifndef O_RDONLY
 #define O_RDONLY 0x00
 #endif
+#ifndef O_READ
+#define O_READ O_RDONLY
+#endif
 #ifndef O_WRONLY
 #define O_WRONLY 0x01
+#endif
+#ifndef O_WRITE
+#define O_WRITE O_WRONLY
 #endif
 #ifndef O_RDWR
 #define O_RDWR 0x02

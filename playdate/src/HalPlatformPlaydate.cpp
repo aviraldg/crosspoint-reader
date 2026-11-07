@@ -203,7 +203,10 @@ void HalClock::setTimezone(const char* posixTz) {
 }
 
 bool HalClock::localTime(struct tm& out) const {
-  if (!gPlaydateApi || !gPlaydateApi->system) return false;
+  if (!gPlaydateApi || !gPlaydateApi->system || !gPlaydateApi->system->getSecondsSinceEpoch ||
+      !gPlaydateApi->system->convertEpochToDateTime) {
+    return false;
+  }
   const uint32_t pdEpoch = gPlaydateApi->system->getSecondsSinceEpoch(nullptr);
   const int32_t tzOffset = gPlaydateApi->system->getTimezoneOffset ? gPlaydateApi->system->getTimezoneOffset() : 0;
   const uint32_t localPdEpoch =
@@ -377,13 +380,3 @@ size_t read(const std::string& bookPath, uint8_t (&key)[MAX_KEY_LEN], int64_t* e
 }
 
 }  // namespace bookkey
-
-void silentRestart() {}
-
-void silentRestartToReader() {}
-
-void silentRestartToSettings() {}
-
-void silentRestartToJoinNetwork() {}
-
-void restartToHomeAfterStorageHandoff() {}
