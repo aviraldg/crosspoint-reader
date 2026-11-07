@@ -1,7 +1,11 @@
 #pragma once
 #include <Arduino.h>
 #include <BoardConfig.h>
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+#include <GrayscaleCapabilities.h>
+#else
 #include <EInkDisplay.h>
+#endif
 
 class HalDisplay {
  public:
@@ -16,6 +20,23 @@ class HalDisplay {
   // When checking stripUploads, pass the grayscale mode used for the planes.
   GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const;
   // Controller of the driver chosen at boot (null if the driver does not say).
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+  const char* controllerName() const;
+  // Part number of the panel the boot probe identified (null if unknown).
+  const char* panelName() const;
+  // True while book pages are presented; panels with a reading waveform use it.
+  void setReaderRefresh(bool reading) { (void)reading; }
+  // True asks text-overlay gray passes for every gray level (image pages).
+  void setOverlayFullTone(bool fullTone) { (void)fullTone; }
+  bool displayRetainedGrayscaleOverlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool restore) {
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)restore;
+    return false;
+  }
+#else
   const char* controllerName() const { return einkDisplay.getControllerName(); }
   // Part number of the panel the boot probe identified (null if unknown).
   const char* panelName() const { return einkDisplay.getPanelName(); }
@@ -26,6 +47,7 @@ class HalDisplay {
   bool displayRetainedGrayscaleOverlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool restore) {
     return einkDisplay.displayRetainedGrayscaleOverlay(x, y, w, h, restore);
   }
+#endif
 
   // Constructor with pin configuration
   HalDisplay();
@@ -49,8 +71,13 @@ class HalDisplay {
   void begin(bool seamless = false);
 
   // Display dimensions
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+  static constexpr uint16_t DISPLAY_WIDTH = CROSSPOINT_DISPLAY_WIDTH;
+  static constexpr uint16_t DISPLAY_HEIGHT = CROSSPOINT_DISPLAY_HEIGHT;
+#else
   static constexpr uint16_t DISPLAY_WIDTH = EInkDisplay::DISPLAY_WIDTH;
   static constexpr uint16_t DISPLAY_HEIGHT = EInkDisplay::DISPLAY_HEIGHT;
+#endif
   static constexpr uint16_t DISPLAY_WIDTH_BYTES = DISPLAY_WIDTH / 8;
   static constexpr uint32_t BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT;
 
@@ -124,8 +151,10 @@ class HalDisplay {
   uint16_t getDisplayWidthBytes() const;
   uint32_t getBufferSize() const;
 
+#ifndef CROSSPOINT_CUSTOM_DISPLAY_HAL
  private:
   EInkDisplay einkDisplay;
+#endif
 };
 
 extern HalDisplay display;
