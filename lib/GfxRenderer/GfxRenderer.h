@@ -44,6 +44,16 @@ class GfxRenderer {
     LandscapeCounterClockwise  // 800x480 logical coordinates, native panel orientation
   };
 
+  // Default upright orientation for non-rotated UI screens and reader exit.
+  // Portrait-held panels (800x480 scan rotated 90° CW) default to Portrait;
+  // landscape-native targets can override via CROSSPOINT_DEFAULT_UI_ORIENTATION.
+  static constexpr Orientation DEFAULT_UI_ORIENTATION =
+#ifdef CROSSPOINT_DEFAULT_UI_ORIENTATION
+      CROSSPOINT_DEFAULT_UI_ORIENTATION;
+#else
+      Portrait;
+#endif
+
  private:
   static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;  // 8KB chunks to allow for non-contiguous memory
 
@@ -141,7 +151,7 @@ class GfxRenderer {
 
  public:
   explicit GfxRenderer(HalDisplay& halDisplay)
-      : display(halDisplay), renderMode(BW), orientation(Portrait), fadingFix(false) {}
+      : display(halDisplay), renderMode(BW), orientation(DEFAULT_UI_ORIENTATION), fadingFix(false) {}
   ~GfxRenderer() { freeBwBufferChunks(); }
 
   // Setup

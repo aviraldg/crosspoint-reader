@@ -114,7 +114,7 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   }
 
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
 
   const int pageHeight = renderer.getScreenHeight();
   constexpr int buttonWidth = 80;
