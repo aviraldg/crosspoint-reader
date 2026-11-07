@@ -45,6 +45,9 @@ ActivityManager::ActivityManager(GfxRenderer& renderer, MappedInputManager& mapp
 ActivityManager::~ActivityManager() { assert(false); /* should never be called */ }
 
 void ActivityManager::begin() {
+#if defined(CROSSPOINT_COOPERATIVE_RENDER) && CROSSPOINT_COOPERATIVE_RENDER
+  return;
+#else
 #if defined(configNUM_CORES) && configNUM_CORES > 1
   constexpr BaseType_t renderTaskCore = 1;
 #else
@@ -68,6 +71,7 @@ void ActivityManager::begin() {
                           renderTaskCore  // Keep long renders/cover decodes off CPU 0's idle watchdog when available
   );
   assert(renderTaskHandle != nullptr && "Failed to create render task");
+#endif
 }
 
 void ActivityManager::renderTaskTrampoline(void* param) {
@@ -75,30 +79,34 @@ void ActivityManager::renderTaskTrampoline(void* param) {
   self->renderTaskLoop();
 }
 
+void ActivityManager::renderFrame() {
+  // Acquire the lock before reading currentActivity to avoid a TOCTOU race
+  // where the main task deletes the activity between the null-check and render().
+  RenderLock lock;
+  if (currentActivity) {
+    HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
+    // Night mode is a global output polarity applied to every activity.
+    // The sleep screen forces normal polarity itself (SleepActivity).
+    display.setInverted(SETTINGS.screenInverted != 0);
+    const uint32_t renderingVisit = screenVisit;
+    currentActivity->render(std::move(lock));
+    paintedVisit.store(renderingVisit, std::memory_order_release);
+  }
+  // Notify any task blocked in requestUpdateAndWait() that the render is done.
+  TaskHandle_t waiter = nullptr;
+  taskENTER_CRITICAL(&activityManagerSpinlock);
+  waiter = waitingTaskHandle;
+  waitingTaskHandle = nullptr;
+  taskEXIT_CRITICAL(&activityManagerSpinlock);
+  if (waiter) {
+    xTaskNotify(waiter, 1, eIncrement);
+  }
+}
+
 void ActivityManager::renderTaskLoop() {
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // Acquire the lock before reading currentActivity to avoid a TOCTOU race
-    // where the main task deletes the activity between the null-check and render().
-    RenderLock lock;
-    if (currentActivity) {
-      HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
-      // Night mode is a global output polarity applied to every activity.
-      // The sleep screen forces normal polarity itself (SleepActivity).
-      display.setInverted(SETTINGS.screenInverted != 0);
-      const uint32_t renderingVisit = screenVisit;
-      currentActivity->render(std::move(lock));
-      paintedVisit.store(renderingVisit, std::memory_order_release);
-    }
-    // Notify any task blocked in requestUpdateAndWait() that the render is done.
-    TaskHandle_t waiter = nullptr;
-    taskENTER_CRITICAL(&activityManagerSpinlock);
-    waiter = waitingTaskHandle;
-    waitingTaskHandle = nullptr;
-    taskEXIT_CRITICAL(&activityManagerSpinlock);
-    if (waiter) {
-      xTaskNotify(waiter, 1, eIncrement);
-    }
+    renderFrame();
   }
 }
 
@@ -110,8 +118,14 @@ void ActivityManager::loop() {
     // An exclusive-storage activity must restart rather than navigate away:
     // processing a pending action here could re-enable filesystem users while
     // the USB host still owns the raw SD card.
-    if (requestedUpdate.exchange(false) && renderTaskHandle) {
-      xTaskNotify(renderTaskHandle, 1, eIncrement);
+    if (requestedUpdate.exchange(false)) {
+#if defined(CROSSPOINT_COOPERATIVE_RENDER) && CROSSPOINT_COOPERATIVE_RENDER
+      renderFrame();
+#else
+      if (renderTaskHandle) {
+        xTaskNotify(renderTaskHandle, 1, eIncrement);
+      }
+#endif
     }
     return;
   }
@@ -236,11 +250,15 @@ void ActivityManager::loop() {
   }
 
   if (requestedUpdate.exchange(false)) {
+#if defined(CROSSPOINT_COOPERATIVE_RENDER) && CROSSPOINT_COOPERATIVE_RENDER
+    renderFrame();
+#else
     // Using direct notification to signal the render task to update
     // Increment counter so multiple rapid calls won't be lost
     if (renderTaskHandle) {
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
+#endif
   }
 }
 
@@ -471,6 +489,14 @@ void ActivityManager::prepareForSleep() {
 }
 
 void ActivityManager::requestUpdate(bool immediate) {
+#if defined(CROSSPOINT_COOPERATIVE_RENDER) && CROSSPOINT_COOPERATIVE_RENDER
+  if (immediate && !RenderLock::peek() && pendingAction == PendingAction::None) {
+    requestedUpdate = false;
+    renderFrame();
+  } else {
+    requestedUpdate = true;
+  }
+#else
   if (immediate) {
     if (renderTaskHandle) {
       xTaskNotify(renderTaskHandle, 1, eIncrement);
@@ -480,8 +506,14 @@ void ActivityManager::requestUpdate(bool immediate) {
     // This is to avoid multiple updates being requested in the same loop
     requestedUpdate = true;
   }
+#endif
 }
 void ActivityManager::requestUpdateAndWait() {
+#if defined(CROSSPOINT_COOPERATIVE_RENDER) && CROSSPOINT_COOPERATIVE_RENDER
+  assert(!RenderLock::peek() && "Cannot call requestUpdateAndWait() while holding RenderLock");
+  requestedUpdate = false;
+  renderFrame();
+#else
   if (!renderTaskHandle) {
     return;
   }
@@ -509,6 +541,7 @@ void ActivityManager::requestUpdateAndWait() {
 
   xTaskNotify(renderTaskHandle, 1, eIncrement);
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#endif
 }
 
 // RenderLock

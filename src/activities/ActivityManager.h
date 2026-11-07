@@ -53,6 +53,7 @@ class ActivityManager {
   // Task to render and display the activity
   TaskHandle_t renderTaskHandle = nullptr;
   static void renderTaskTrampoline(void* param);
+  void renderFrame();
   [[noreturn]] virtual void renderTaskLoop();
 
   // Set by requestUpdateAndWait(); read and cleared by the render task after render completes.
