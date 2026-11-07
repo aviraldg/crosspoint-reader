@@ -20,9 +20,14 @@
 #include <TrustedTime.h>
 #include <builtinFonts/all.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#if defined(TARGET_SIMULATOR)
+#include <ucontext.h>
+#endif
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -315,8 +320,79 @@ void seedSampleBooksIfNeeded() {
   }
 }
 
+#if defined(TARGET_SIMULATOR)
+constexpr size_t kSimulatorFiberStackSize = 512 * 1024;
+ucontext_t gHostCtx{};
+ucontext_t gFiberCtx{};
+std::vector<uint8_t> gFiberStack;
+bool gFiberInitialized = false;
+bool gInFiber = false;
+bool gYielded = false;
+
+void simulatorFiberEntry() {
+  for (;;) {
+    gYielded = false;
+    mappedInputManager.update();
+    activityManager.loop();
+    gInFiber = false;
+    swapcontext(&gFiberCtx, &gHostCtx);
+  }
+}
+#elif defined(TARGET_PLAYDATE)
+struct ArmFiberContext {
+  uint32_t regs[9];   // r4-r11, lr
+  uint32_t vfp[16];   // s16-s31
+  uint32_t sp;
+};
+
+constexpr size_t kDeviceFiberStackSize = 64 * 1024;
+ArmFiberContext gHostCtx{};
+ArmFiberContext gFiberCtx{};
+uint8_t* gFiberStack = nullptr;
+bool gFiberInitialized = false;
+bool gInFiber = false;
+bool gYielded = false;
+
+extern "C" {
+
+__attribute__((naked)) void armSwapContext(ArmFiberContext* from, const ArmFiberContext* to) {
+  __asm__ volatile(
+      "stmia r0!, {r4-r11, lr}\n"
+      "vstmia r0!, {s16-s31}\n"
+      "str sp, [r0]\n"
+      "ldmia r1!, {r4-r11, lr}\n"
+      "vldmia r1!, {s16-s31}\n"
+      "ldr sp, [r1]\n"
+      "bx lr\n");
+}
+
+}  // extern "C"
+
+void deviceFiberEntry() {
+  for (;;) {
+    gYielded = false;
+    mappedInputManager.update();
+    activityManager.loop();
+    gInFiber = false;
+    armSwapContext(&gFiberCtx, &gHostCtx);
+  }
+}
+
+void armInitContext(ArmFiberContext* ctx, void (*entry)(), void* stackTop) {
+  std::memset(ctx, 0, sizeof(*ctx));
+  const uint32_t alignedSp = reinterpret_cast<uint32_t>(stackTop) & ~7U;
+  ctx->regs[8] = reinterpret_cast<uint32_t>(entry);  // lr
+  ctx->sp = alignedSp;
+}
+#else
+bool gYielded = false;
+#endif
+
 void onMenuReaderMenu(void* userdata) {
   (void)userdata;
+  if (gYielded) {
+    return;
+  }
   if (!activityManager.remoteShortcut(/*readerMenu=*/true)) {
     mappedInputManager.injectRemoteClick(RemoteButton::Confirm);
   }
@@ -325,6 +401,10 @@ void onMenuReaderMenu(void* userdata) {
 
 void onMenuGoHome(void* userdata) {
   (void)userdata;
+  if (gYielded) {
+    mappedInputManager.injectRemoteClick(RemoteButton::Back);
+    return;
+  }
   activityManager.goHome();
   activityManager.requestUpdate();
 }
@@ -347,12 +427,51 @@ void registerSystemMenuItems(PlaydateAPI* pd) {
 
 int updateCallback(void* userdata) {
   (void)userdata;
+#if defined(TARGET_SIMULATOR)
+  if (!gFiberInitialized) {
+    if (getcontext(&gFiberCtx) == 0) {
+      gFiberStack.resize(kSimulatorFiberStackSize);
+      gFiberCtx.uc_stack.ss_sp = gFiberStack.data();
+      gFiberCtx.uc_stack.ss_size = gFiberStack.size();
+      gFiberCtx.uc_link = &gHostCtx;
+      makecontext(&gFiberCtx, simulatorFiberEntry, 0);
+      gFiberInitialized = true;
+    }
+  }
+  if (gFiberInitialized) {
+    gInFiber = true;
+    swapcontext(&gHostCtx, &gFiberCtx);
+    gInFiber = false;
+  } else {
+    mappedInputManager.update();
+    activityManager.loop();
+  }
+#elif defined(TARGET_PLAYDATE)
+  if (!gFiberInitialized && gFiberStack != nullptr) {
+    armInitContext(&gFiberCtx, deviceFiberEntry, gFiberStack + kDeviceFiberStackSize);
+    gFiberInitialized = true;
+  }
+  if (gFiberInitialized) {
+    gInFiber = true;
+    armSwapContext(&gHostCtx, &gFiberCtx);
+    gInFiber = false;
+  } else {
+    mappedInputManager.update();
+    activityManager.loop();
+  }
+#else
   mappedInputManager.update();
   activityManager.loop();
+#endif
   return 1;
 }
 
 void initCrossPointOnPlaydate(PlaydateAPI* pd) {
+#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+  if (!gFiberStack) {
+    gFiberStack = static_cast<uint8_t*>(std::malloc(kDeviceFiberStackSize));
+  }
+#endif
   HalSystem::begin();
   gpio.begin();
   powerManager.begin();
@@ -365,8 +484,12 @@ void initCrossPointOnPlaydate(PlaydateAPI* pd) {
   // Default to compact 12pt font, LandscapeCCW orientation, and 1-bit Bayer-dithered images on Playdate
   SETTINGS.fontPointSize = 12;
   SETTINGS.orientation = CrossPointSettings::ORIENTATION::LANDSCAPE_CCW;
+  SETTINGS.frontButtonFollowOrientation = 0;
+  SETTINGS.sideButtonFollowOrientation = 0;
   SETTINGS.imageRendering = CrossPointSettings::IMAGES_DISPLAY_BW;
   SETTINGS.loadFromFile();
+  SETTINGS.frontButtonFollowOrientation = 0;
+  SETTINGS.sideButtonFollowOrientation = 0;
 
   timezones::applyToClock();
   RECENT_BOOKS.loadFromFile();
@@ -422,7 +545,26 @@ void WifiSelectionActivity::render(RenderLock&&) {}
 
 namespace playdate_hal {
 
-void pumpMainLoop() { mappedInputManager.update(); }
+void pumpMainLoop() {
+#if defined(TARGET_SIMULATOR)
+  if (gInFiber) {
+    gInFiber = false;
+    gYielded = true;
+    swapcontext(&gFiberCtx, &gHostCtx);
+    gYielded = false;
+    gInFiber = true;
+  }
+#elif defined(TARGET_PLAYDATE)
+  if (gInFiber) {
+    gInFiber = false;
+    gYielded = true;
+    armSwapContext(&gFiberCtx, &gHostCtx);
+    gYielded = false;
+    gInFiber = true;
+  }
+#endif
+  mappedInputManager.update();
+}
 
 }  // namespace playdate_hal
 

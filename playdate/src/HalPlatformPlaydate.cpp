@@ -63,6 +63,9 @@ void delay(unsigned long ms) {
   const unsigned long start = millis();
   while (millis() - start < ms) {
     playdate_hal::pumpMainLoop();
+    if (millis() - start >= ms) {
+      break;
+    }
     if (gPlaydateApi && gPlaydateApi->system && gPlaydateApi->system->delay) {
       const unsigned long remaining = ms - (millis() - start);
       gPlaydateApi->system->delay(static_cast<uint32_t>(std::min<unsigned long>(remaining, 10UL)));
