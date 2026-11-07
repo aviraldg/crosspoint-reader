@@ -13,6 +13,7 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <memory>
 
 namespace freeink {
 
@@ -25,6 +26,8 @@ struct AccessWaitState {
   volatile bool allowed = false;
 };
 
+AccessWaitState gAccessWaitState;
+
 void onAccessResponse(bool allowed, void* userdata) {
   auto* state = static_cast<AccessWaitState*>(userdata);
   if (!state) return;
@@ -33,17 +36,24 @@ void onAccessResponse(bool allowed, void* userdata) {
 }
 
 struct RequestCallbackState {
+  std::string host;
+  std::string path;
+  std::string headerBlob;
+  std::vector<uint8_t> readBuf;
   std::vector<std::pair<std::string, std::string>> headers;
   size_t contentLength = 0;
   bool haveContentLength = false;
   volatile bool headersRead = false;
+  volatile bool bodyAvailable = false;
   volatile bool requestComplete = false;
   volatile bool connectionClosed = false;
 };
 
 void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) {
   if (!conn || !key || !value) return;
-  auto* state = static_cast<RequestCallbackState*>(playdate_hal::pd()->network->http->getUserdata(conn));
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
   if (!state || state->headers.size() >= 64) return;
 
   std::string name(key);
@@ -62,22 +72,40 @@ void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) 
 
 void onHeadersRead(HTTPConnection* conn) {
   if (!conn) return;
-  auto* state = static_cast<RequestCallbackState*>(playdate_hal::pd()->network->http->getUserdata(conn));
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
   if (state) state->headersRead = true;
+}
+
+void onResponse(HTTPConnection* conn) {
+  if (!conn) return;
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
+  if (state) {
+    state->headersRead = true;
+    state->bodyAvailable = true;
+  }
 }
 
 void onRequestComplete(HTTPConnection* conn) {
   if (!conn) return;
-  auto* state = static_cast<RequestCallbackState*>(playdate_hal::pd()->network->http->getUserdata(conn));
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
   if (state) {
     state->headersRead = true;
+    state->bodyAvailable = true;
     state->requestComplete = true;
   }
 }
 
 void onConnectionClosed(HTTPConnection* conn) {
   if (!conn) return;
-  auto* state = static_cast<RequestCallbackState*>(playdate_hal::pd()->network->http->getUserdata(conn));
+  PlaydateAPI* pd = playdate_hal::pd();
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
   if (state) state->connectionClosed = true;
 }
 
@@ -109,27 +137,28 @@ bool parseByteRange(const std::string& headerLine, int& startOut, int& endOut) {
 bool ensureHostAccess(const std::string& host, uint16_t port, bool useSsl, uint32_t timeoutMs,
                       const SecureHttpClient::AbortCallback& shouldAbort, bool& abortedOut) {
   PlaydateAPI* pd = playdate_hal::pd();
-  if (!pd || !pd->network || !pd->network->http) return false;
+  if (!pd || !pd->network || !pd->network->http || host.empty()) return false;
 
-  static AccessWaitState waitState;
-  waitState.decided = false;
-  waitState.allowed = false;
+  std::unique_ptr<char[]> heapHost(new char[host.size() + 1]);
+  std::memcpy(heapHost.get(), host.c_str(), host.size() + 1);
+
+  gAccessWaitState.decided = false;
+  gAccessWaitState.allowed = false;
   const accessReply status = pd->network->http->requestAccess(
-      host.c_str(), static_cast<int>(port), useSsl, "CrossPoint network access", onAccessResponse, &waitState);
+      heapHost.get(), static_cast<int>(port), useSsl, "CrossPoint network access", onAccessResponse, &gAccessWaitState);
   if (status == kAccessAllow) return true;
   if (status == kAccessDeny) return false;
 
   const unsigned long deadline = millis() + timeoutMs;
-  while (!waitState.decided) {
+  while (!gAccessWaitState.decided) {
     if (shouldAbort && shouldAbort()) {
       abortedOut = true;
       return false;
     }
     if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
     playdate_hal::pumpMainLoop();
-    delay(5);
   }
-  return waitState.allowed;
+  return gAccessWaitState.allowed;
 }
 
 }  // namespace
@@ -167,7 +196,8 @@ void SecureHttpClient::end() {
 
 bool SecureHttpClient::connect(const AbortCallback& shouldAbort) {
   if (_host.empty()) return false;
-  return ensureHostAccess(_host, _port, _scheme == "https", _timeoutMs, shouldAbort, _aborted);
+  const uint32_t effectiveTimeoutMs = std::min<uint32_t>(_timeoutMs, 15000U);
+  return ensureHostAccess(_host, _port, _scheme == "https", effectiveTimeoutMs, shouldAbort, _aborted);
 }
 
 void SecureHttpClient::addHeader(const std::string& name, const std::string& value) {
@@ -237,26 +267,36 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http || _host.empty()) return -1;
 
+  const uint32_t effectiveTimeoutMs = std::min<uint32_t>(_timeoutMs, 15000U);
   const bool useSsl = (_scheme == "https");
-  if (!ensureHostAccess(_host, _port, useSsl, _timeoutMs, shouldAbort, _aborted)) return -1;
+  if (!ensureHostAccess(_host, _port, useSsl, effectiveTimeoutMs, shouldAbort, _aborted)) return -1;
 
-  HTTPConnection* conn = pd->network->http->newConnection(_host.c_str(), static_cast<int>(_port), useSsl);
+  auto state = std::make_unique<RequestCallbackState>();
+  state->host = _host;
+  state->path = _path.empty() ? "/" : _path;
+  state->readBuf.resize(kReadChunkSize);
+
+  HTTPConnection* conn = pd->network->http->newConnection(state->host.c_str(), static_cast<int>(_port), useSsl);
   if (!conn) return -1;
 
-  RequestCallbackState state;
-  pd->network->http->setUserdata(conn, &state);
-  pd->network->http->setConnectTimeout(conn, static_cast<int>(_timeoutMs));
-  pd->network->http->setReadTimeout(conn, static_cast<int>(_timeoutMs));
+  pd->network->http->setUserdata(conn, state.get());
+  pd->network->http->setConnectTimeout(conn, static_cast<int>(effectiveTimeoutMs));
+  pd->network->http->setReadTimeout(conn, 50);
   pd->network->http->setKeepAlive(conn, _reuse);
   pd->network->http->setHeaderReceivedCallback(conn, onHeaderReceived);
   pd->network->http->setHeadersReadCallback(conn, onHeadersRead);
+  if (pd->network->http->setResponseCallback) {
+    pd->network->http->setResponseCallback(conn, onResponse);
+  }
   pd->network->http->setRequestCompleteCallback(conn, onRequestComplete);
   pd->network->http->setConnectionClosedCallback(conn, onConnectionClosed);
 
-  std::string headerBlob = "User-Agent: " + _userAgent + "\r\n";
+  if (!_userAgent.empty()) {
+    state->headerBlob += "User-Agent: " + _userAgent + "\r\n";
+  }
   if (!_authUser.empty()) {
     const std::string creds = _authUser + ":" + _authPass;
-    headerBlob += "Authorization: Basic " + std::string(base64::encode(creds.c_str()).c_str()) + "\r\n";
+    state->headerBlob += "Authorization: Basic " + std::string(base64::encode(creds.c_str()).c_str()) + "\r\n";
   }
   for (const std::string& h : _headers) {
     int rangeStart = 0;
@@ -264,23 +304,32 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     if (parseByteRange(h, rangeStart, rangeEnd)) {
       pd->network->http->setByteRange(conn, rangeStart, rangeEnd);
     }
-    headerBlob += h;
+    state->headerBlob += h;
   }
 
+  const char* headersPtr = state->headerBlob.empty() ? nullptr : state->headerBlob.c_str();
+  const size_t headersLen = state->headerBlob.size();
   const char* reqMethod = method ? method : "GET";
   PDNetErr err = NET_OK;
   if (std::strcmp(reqMethod, "GET") == 0 && (!payload || payloadLen == 0)) {
-    err = pd->network->http->get(conn, _path.c_str(), headerBlob.c_str(), headerBlob.size());
+    err = pd->network->http->get(conn, state->path.c_str(), headersPtr, headersLen);
   } else if (std::strcmp(reqMethod, "POST") == 0) {
-    err = pd->network->http->post(conn, _path.c_str(), headerBlob.c_str(), headerBlob.size(),
+    err = pd->network->http->post(conn, state->path.c_str(), headersPtr, headersLen,
                                   reinterpret_cast<const char*>(payload), payloadLen);
   } else {
-    err = pd->network->http->query(conn, reqMethod, _path.c_str(), headerBlob.c_str(), headerBlob.size(),
+    err = pd->network->http->query(conn, reqMethod, state->path.c_str(), headersPtr, headersLen,
                                    reinterpret_cast<const char*>(payload), payloadLen);
   }
 
   auto cleanupConn = [&]() {
     pd->network->http->setUserdata(conn, nullptr);
+    pd->network->http->setHeaderReceivedCallback(conn, nullptr);
+    pd->network->http->setHeadersReadCallback(conn, nullptr);
+    if (pd->network->http->setResponseCallback) {
+      pd->network->http->setResponseCallback(conn, nullptr);
+    }
+    pd->network->http->setRequestCompleteCallback(conn, nullptr);
+    pd->network->http->setConnectionClosedCallback(conn, nullptr);
     pd->network->http->close(conn);
     pd->network->http->release(conn);
   };
@@ -290,19 +339,25 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     return -1;
   }
 
-  unsigned long deadline = millis() + _timeoutMs;
-  while (!state.headersRead && !state.requestComplete && !state.connectionClosed) {
+  unsigned long deadline = millis() + effectiveTimeoutMs;
+  while (!state->headersRead && !state->requestComplete && !state->connectionClosed) {
     if (shouldAbort && shouldAbort()) {
       _aborted = true;
       cleanupConn();
       return -1;
+    }
+    if (pd->network->http->getError) {
+      const PDNetErr netErr = pd->network->http->getError(conn);
+      if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY) {
+        cleanupConn();
+        return -1;
+      }
     }
     if (static_cast<int32_t>(millis() - deadline) >= 0) {
       cleanupConn();
       return -1;
     }
     playdate_hal::pumpMainLoop();
-    delay(2);
   }
 
   _status = pd->network->http->getResponseStatus(conn);
@@ -311,12 +366,12 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     return -1;
   }
 
-  _responseHeaders.reserve(state.headers.size());
-  for (const auto& kv : state.headers) {
+  _responseHeaders.reserve(state->headers.size());
+  for (const auto& kv : state->headers) {
     _responseHeaders.push_back(Header{kv.first, kv.second});
   }
-  _contentLength = state.contentLength;
-  _haveContentLength = state.haveContentLength;
+  _contentLength = state->contentLength;
+  _haveContentLength = state->haveContentLength;
 
   const bool discardBody = _followRedirects > 0 && isRedirectStatus(_status);
   const DataCallback discard = [](const uint8_t*, size_t) { return true; };
@@ -324,8 +379,7 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   _downloaded = 0;
   _reportProgress = !discardBody && static_cast<bool>(_progress);
 
-  uint8_t buf[kReadChunkSize];
-  deadline = millis() + _timeoutMs;
+  deadline = millis() + effectiveTimeoutMs;
   for (;;) {
     if (shouldAbort && shouldAbort()) {
       _aborted = true;
@@ -333,30 +387,41 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
       return _status;
     }
 
-    const size_t avail = pd->network->http->getBytesAvailable(conn);
-    if (avail > 0) {
-      const size_t want = avail < sizeof(buf) ? avail : sizeof(buf);
-      const int n = pd->network->http->read(conn, buf, static_cast<unsigned int>(want));
-      if (n > 0) {
-        deadline = millis() + _timeoutMs;
-        if (bodySink && !bodySink(buf, static_cast<size_t>(n))) {
-          _callbackAborted = true;
-          cleanupConn();
-          return _status;
+    if (state->bodyAvailable || state->requestComplete || state->connectionClosed) {
+      const int avail = static_cast<int>(pd->network->http->getBytesAvailable(conn));
+      if (avail > 0) {
+        const size_t want =
+            static_cast<size_t>(avail) < state->readBuf.size() ? static_cast<size_t>(avail) : state->readBuf.size();
+        const int n = pd->network->http->read(conn, state->readBuf.data(), static_cast<unsigned int>(want));
+        if (n > 0) {
+          deadline = millis() + effectiveTimeoutMs;
+          if (bodySink && !bodySink(state->readBuf.data(), static_cast<size_t>(n))) {
+            _callbackAborted = true;
+            cleanupConn();
+            return _status;
+          }
+          _downloaded += static_cast<size_t>(n);
+          if (_reportProgress && !_progress(_downloaded, _haveContentLength ? _contentLength : 0)) {
+            _callbackAborted = true;
+            cleanupConn();
+            return _status;
+          }
+          continue;
         }
-        _downloaded += static_cast<size_t>(n);
-        if (_reportProgress && !_progress(_downloaded, _haveContentLength ? _contentLength : 0)) {
-          _callbackAborted = true;
-          cleanupConn();
-          return _status;
-        }
-        continue;
       }
     }
 
-    if (state.requestComplete || state.connectionClosed) {
-      if (pd->network->http->getBytesAvailable(conn) == 0) {
-        _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength) || state.requestComplete;
+    if (state->requestComplete || state->connectionClosed) {
+      const int availAfter = static_cast<int>(pd->network->http->getBytesAvailable(conn));
+      if (availAfter <= 0) {
+        _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength) || state->requestComplete;
+        break;
+      }
+    }
+
+    if (pd->network->http->getError) {
+      const PDNetErr netErr = pd->network->http->getError(conn);
+      if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY) {
         break;
       }
     }
@@ -366,7 +431,6 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     }
 
     playdate_hal::pumpMainLoop();
-    delay(2);
   }
 
   cleanupConn();
