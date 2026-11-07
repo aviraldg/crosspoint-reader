@@ -2,6 +2,7 @@
 
 #include <BoardConfig.h>
 #include <HalClock.h>
+#include <HalDisplay.h>
 #include <HalFrontlight.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
@@ -300,6 +301,17 @@ inline bool isHiddenOnDevice(const SettingInfo& s) {
     // power click (other touch boards) cover these shortcuts.
     case StrId::STR_LONG_PRESS_MENU:
       return BoardConfig::hasTouch();
+    // E-ink refresh / anti-aliasing and ESP32 deep-sleep settings do not apply
+    // on 240p non-e-ink panels (Playdate).
+    case StrId::STR_SLEEP_SCREEN:
+    case StrId::STR_SLEEP_COVER_MODE:
+    case StrId::STR_SLEEP_COVER_FILTER:
+    case StrId::STR_QUICK_RESUME_TIMEOUT:
+    case StrId::STR_TIME_TO_SLEEP:
+    case StrId::STR_REFRESH_FREQ:
+    case StrId::STR_SUNLIGHT_FADING_FIX:
+    case StrId::STR_TEXT_AA:
+      return HalDisplay::DISPLAY_HEIGHT <= 240;
     default:
       return false;
   }

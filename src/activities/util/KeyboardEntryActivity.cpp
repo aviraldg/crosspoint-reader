@@ -1,6 +1,7 @@
 #include "KeyboardEntryActivity.h"
 
 #include <BidiUtils.h>
+#include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <I18n.h>
 
@@ -23,9 +24,18 @@ constexpr int KEYBOARD_PANEL_PADDING = 4;
 constexpr int BUTTON_KEY_HEIGHT = 42;
 constexpr int BUTTON_KEYBOARD_HINT_GAP = 4;
 
-int keyboardGap(const ThemeMetrics& metrics) { return std::max(metrics.keyboardKeySpacing, KEYBOARD_MIN_GAP); }
+int keyboardGap(const ThemeMetrics& metrics) {
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    return std::max(metrics.keyboardKeySpacing, 2);
+  }
+  return std::max(metrics.keyboardKeySpacing, KEYBOARD_MIN_GAP);
+}
 
 int keyboardKeysHeight(const ThemeMetrics& metrics, const int rows, const bool hasTouch) {
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    const int keyHeight = std::min(metrics.keyboardKeyHeight, 24);
+    return rows * keyHeight + (rows > 1 ? (rows - 1) * keyboardGap(metrics) : 0) + 4;
+  }
   const int keyHeight = hasTouch ? metrics.keyboardKeyHeight : BUTTON_KEY_HEIGHT;
   return rows * keyHeight + (rows > 1 ? (rows - 1) * keyboardGap(metrics) : 0) + KEYBOARD_PANEL_PADDING * 2;
 }
@@ -442,8 +452,11 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
   const Rect content = UITheme::getContentArea(renderer);
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
-                          metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
+  const int inputStartY =
+      HalDisplay::DISPLAY_HEIGHT <= 240
+          ? metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + 2
+          : metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + metrics.verticalSpacing * 4 +
+                metrics.keyboardVerticalOffset;
 
   int availableWidth = content.width;
   if (gpio.deviceIsX3()) {
@@ -747,8 +760,11 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title.c_str());
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
-                          metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
+  const int inputStartY =
+      HalDisplay::DISPLAY_HEIGHT <= 240
+          ? metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + 2
+          : metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + metrics.verticalSpacing * 4 +
+                metrics.keyboardVerticalOffset;
   int inputHeight = 0;
 
   std::string displayText = displayTextForCurrentState();
@@ -982,7 +998,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   interactions.beginPublishCycle();
   fui::GfxRendererTarget target(renderer);
   target.setFont(fui::GfxRendererTarget::FONT_SMALL, SMALL_FONT_ID);
-  target.setFont(fui::GfxRendererTarget::FONT_BODY, UI_12_FONT_ID);
+  target.setFont(fui::GfxRendererTarget::FONT_BODY, HalDisplay::DISPLAY_HEIGHT <= 240 ? UI_10_FONT_ID : UI_12_FONT_ID);
   const fui::DeviceContext device = target.deviceContext();
   const fui::InputSnapshot noInput{};
   fui::Frame<56> frame(target, device, noInput, interactions);
@@ -1003,6 +1019,12 @@ void KeyboardEntryActivity::render(RenderLock&&) {
                                                                                  : fui::GfxRendererTarget::FONT_BODY;
   props.altText.font = fui::GfxRendererTarget::FONT_SMALL;
   props.gap = props.rowGap = static_cast<int16_t>(keyboardGap(metrics));
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    props.padding = fui::Insets{2, 2, 2, 2};
+    props.altHintRightPadding = 2;
+    props.altLabelGap = 1;
+    props.digitLabelOffsetX = -5;
+  }
   if (urlPanel) props.uniformKeyWidth = false;  // Shortcut rows stretch independently.
   if (!mappedInput.hasTouch()) props.background = fui::Paint::none();
   frame.target().fill(kbRect, props.background);

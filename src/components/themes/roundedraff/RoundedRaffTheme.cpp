@@ -205,14 +205,14 @@ void RoundedRaffTheme::drawTextField(const GfxRenderer& renderer, Rect rect, con
 
 void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                        const char* btn4) const {
-  if (gpio.hasTouch()) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  if (gpio.hasTouch() || metrics.buttonHintsHeight <= 0) {
     return;
   }
 
   const GfxRenderer::Orientation origOrientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
   const int sidePadding = 20;

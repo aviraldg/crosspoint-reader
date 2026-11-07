@@ -111,14 +111,14 @@ void LyraTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
 
 void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                 const char* btn4) const {
-  if (gpio.hasTouch()) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  if (gpio.hasTouch() || metrics.buttonHintsHeight <= 0) {
     return;
   }
 
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageHeight = renderer.getScreenHeight();
   const int screenWidth = renderer.getScreenWidth();
   constexpr int buttonWidth = 80;
@@ -159,7 +159,7 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
 }
 
 void LyraTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const {
-  if (gpio.hasTouch()) {
+  if (gpio.hasTouch() || HalDisplay::DISPLAY_HEIGHT <= 240) {
     return;
   }
 

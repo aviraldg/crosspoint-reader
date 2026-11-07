@@ -98,10 +98,14 @@ const ThemeMetrics& UITheme::getMetrics() const {
       adjustedMetrics.homeCoverHeight = std::min(adjustedMetrics.homeCoverHeight, 56);
       adjustedMetrics.homeCoverTileHeight = std::min(adjustedMetrics.homeCoverTileHeight, 72);
       adjustedMetrics.homeMenuTopOffset = std::min(adjustedMetrics.homeMenuTopOffset, 2);
-      adjustedMetrics.buttonHintsHeight = std::min(adjustedMetrics.buttonHintsHeight, 22);
+      adjustedMetrics.buttonHintsHeight = 0;
       adjustedMetrics.statusBarVerticalMargin = std::min(adjustedMetrics.statusBarVerticalMargin, 15);
       adjustedMetrics.popupMarginX = std::min(adjustedMetrics.popupMarginX, 10);
       adjustedMetrics.popupMarginY = std::min(adjustedMetrics.popupMarginY, 8);
+      adjustedMetrics.headerClockCentered = false;
+      adjustedMetrics.keyboardKeyHeight = std::min(adjustedMetrics.keyboardKeyHeight, 24);
+      adjustedMetrics.keyboardKeySpacing = std::min(adjustedMetrics.keyboardKeySpacing, 2);
+      adjustedMetrics.keyboardVerticalOffset = 0;
     }
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
