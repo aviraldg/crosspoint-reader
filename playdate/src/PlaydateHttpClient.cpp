@@ -161,6 +161,35 @@ bool ensureHostAccess(const std::string& host, uint16_t port, bool useSsl, uint3
   return gAccessWaitState.allowed;
 }
 
+struct RetiredConnection {
+  HTTPConnection* conn;
+  unsigned long closedAtMs;
+};
+
+std::vector<RetiredConnection>& retiredConnections() {
+  static std::vector<RetiredConnection> list;
+  return list;
+}
+
+void reapRetiredConnections(PlaydateAPI* pd, bool forceOldest = false) {
+  if (!pd || !pd->network || !pd->network->http) return;
+  auto& list = retiredConnections();
+  const unsigned long now = millis();
+  auto it = list.begin();
+  while (it != list.end()) {
+    if (static_cast<int32_t>(now - it->closedAtMs) >= 10000) {
+      pd->network->http->release(it->conn);
+      it = list.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (forceOldest && list.size() > 8) {
+    pd->network->http->release(list.front().conn);
+    list.erase(list.begin());
+  }
+}
+
 }  // namespace
 
 SecureHttpClient::~SecureHttpClient() { end(); }
@@ -267,6 +296,8 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http || _host.empty()) return -1;
 
+  reapRetiredConnections(pd, /*forceOldest=*/false);
+
   const uint32_t effectiveTimeoutMs = std::min<uint32_t>(_timeoutMs, 15000U);
   const bool useSsl = (_scheme == "https");
   if (!ensureHostAccess(_host, _port, useSsl, effectiveTimeoutMs, shouldAbort, _aborted)) return -1;
@@ -282,7 +313,9 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   pd->network->http->setUserdata(conn, state.get());
   pd->network->http->setConnectTimeout(conn, static_cast<int>(effectiveTimeoutMs));
   pd->network->http->setReadTimeout(conn, 50);
-  pd->network->http->setKeepAlive(conn, _reuse);
+  // Always disable keep-alive on single-request HTTPConnection instances so
+  // chunked responses close immediately at end-of-body instead of hanging until timeout.
+  pd->network->http->setKeepAlive(conn, false);
   pd->network->http->setHeaderReceivedCallback(conn, onHeaderReceived);
   pd->network->http->setHeadersReadCallback(conn, onHeadersRead);
   if (pd->network->http->setResponseCallback) {
@@ -298,13 +331,20 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     const std::string creds = _authUser + ":" + _authPass;
     state->headerBlob += "Authorization: Basic " + std::string(base64::encode(creds.c_str()).c_str()) + "\r\n";
   }
+  bool hasConnectionHeader = false;
   for (const std::string& h : _headers) {
     int rangeStart = 0;
     int rangeEnd = 0;
     if (parseByteRange(h, rangeStart, rangeEnd)) {
       pd->network->http->setByteRange(conn, rangeStart, rangeEnd);
     }
+    if (h.size() >= 11 && strncasecmp(h.c_str(), "Connection:", 11) == 0) {
+      hasConnectionHeader = true;
+    }
     state->headerBlob += h;
+  }
+  if (!hasConnectionHeader) {
+    state->headerBlob += "Connection: close\r\n";
   }
 
   const char* headersPtr = state->headerBlob.empty() ? nullptr : state->headerBlob.c_str();
@@ -330,8 +370,13 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     }
     pd->network->http->setRequestCompleteCallback(conn, nullptr);
     pd->network->http->setConnectionClosedCallback(conn, nullptr);
-    pd->network->http->close(conn);
-    pd->network->http->release(conn);
+    if (!state->connectionClosed) {
+      pd->network->http->close(conn);
+    }
+    // Defer release(conn) so any in-flight async close/completion event from Playdate's
+    // ESP32 Wi-Fi coprocessor on the next frame never touches a freed HTTPConnection.
+    retiredConnections().push_back(RetiredConnection{conn, millis()});
+    reapRetiredConnections(pd, /*forceOldest=*/true);
   };
 
   if (err != NET_OK) {
@@ -348,7 +393,7 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     }
     if (pd->network->http->getError) {
       const PDNetErr netErr = pd->network->http->getError(conn);
-      if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY) {
+      if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY && netErr != NET_CONNECTION_CLOSED) {
         cleanupConn();
         return -1;
       }
@@ -380,6 +425,7 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   _reportProgress = !discardBody && static_cast<bool>(_progress);
 
   deadline = millis() + effectiveTimeoutMs;
+  unsigned long lastDataMs = millis();
   for (;;) {
     if (shouldAbort && shouldAbort()) {
       _aborted = true;
@@ -394,7 +440,8 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
             static_cast<size_t>(avail) < state->readBuf.size() ? static_cast<size_t>(avail) : state->readBuf.size();
         const int n = pd->network->http->read(conn, state->readBuf.data(), static_cast<unsigned int>(want));
         if (n > 0) {
-          deadline = millis() + effectiveTimeoutMs;
+          lastDataMs = millis();
+          deadline = lastDataMs + effectiveTimeoutMs;
           if (bodySink && !bodySink(state->readBuf.data(), static_cast<size_t>(n))) {
             _callbackAborted = true;
             cleanupConn();
@@ -406,21 +453,49 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
             cleanupConn();
             return _status;
           }
+          if (_haveContentLength && _downloaded >= _contentLength) {
+            _bodyComplete = true;
+            break;
+          }
           continue;
         }
       }
     }
 
-    if (state->requestComplete || state->connectionClosed) {
-      const int availAfter = static_cast<int>(pd->network->http->getBytesAvailable(conn));
-      if (availAfter <= 0) {
+    const int availAfter = static_cast<int>(pd->network->http->getBytesAvailable(conn));
+    if (availAfter <= 0) {
+      if (_haveContentLength && _downloaded >= _contentLength) {
+        _bodyComplete = true;
+        break;
+      }
+      if (state->requestComplete || state->connectionClosed) {
         _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength) || state->requestComplete;
+        break;
+      }
+      if (pd->network->http->getProgress) {
+        int progRead = 0;
+        int progTotal = 0;
+        pd->network->http->getProgress(conn, &progRead, &progTotal);
+        if (progTotal > 0 && progRead >= progTotal && _downloaded >= static_cast<size_t>(progTotal)) {
+          _bodyComplete = true;
+          break;
+        }
+      }
+      // For chunked responses without Content-Length where Playdate OS doesn't fire
+      // requestComplete until socket timeout, finish once body bytes have arrived and
+      // the stream has been idle for 600ms.
+      if (!_haveContentLength && _downloaded > 0 && static_cast<int32_t>(millis() - lastDataMs) >= 600) {
+        _bodyComplete = true;
         break;
       }
     }
 
     if (pd->network->http->getError) {
       const PDNetErr netErr = pd->network->http->getError(conn);
+      if (netErr == NET_CONNECTION_CLOSED) {
+        _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength);
+        break;
+      }
       if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY) {
         break;
       }
