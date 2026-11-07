@@ -828,19 +828,21 @@ def main():
         const openRes = await this._cmd("WOPEN " + vpath);
         if (!openRes.ok) throw new Error("Serial WOPEN failed: " + openRes.rest);
         const step = 120;
+        const flushThreshold = bytes.length <= 2048 ? step : 240;
         let sinceFlush = 0;
         const enc = new TextEncoder();
         for (let i = 0; i < bytes.length; i += step) {{
           const slice = bytes.subarray(i, i + step);
           const b64 = uint8ToBase64(slice);
           const sendChunk = async () => {{
+            if (isVerboseSerialEnabled()) hubLog("debug", "serial-tx", `!CP WDATA (${{slice.length}}B)`);
             await this.writer.write(enc.encode("msg !CP WDATA " + b64 + "\\r\\n"));
           }};
           const next = this.mutex.then(sendChunk, sendChunk);
           this.mutex = next.then(() => undefined, () => undefined);
           await next;
           sinceFlush += slice.length;
-          if (sinceFlush >= 480) {{
+          if (sinceFlush >= flushThreshold) {{
             const fl = await this._cmd("WFLUSH", 8000);
             if (!fl.ok) throw new Error("Serial WFLUSH failed: " + fl.rest);
             sinceFlush = 0;
