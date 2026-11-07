@@ -1,7 +1,11 @@
 #pragma once
 #include <Arduino.h>
 #include <BoardConfig.h>
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+#include <GrayscaleCapabilities.h>
+#else
 #include <EInkDisplay.h>
+#endif
 
 class HalDisplay {
  public:
@@ -15,7 +19,11 @@ class HalDisplay {
 
   GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const;
   // Controller of the driver chosen at boot (null if the driver does not say).
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+  const char* controllerName() const;
+#else
   const char* controllerName() const { return einkDisplay.getControllerName(); }
+#endif
 
   // Constructor with pin configuration
   HalDisplay();
@@ -39,8 +47,13 @@ class HalDisplay {
   void begin(bool seamless = false);
 
   // Display dimensions
+#ifdef CROSSPOINT_CUSTOM_DISPLAY_HAL
+  static constexpr uint16_t DISPLAY_WIDTH = CROSSPOINT_DISPLAY_WIDTH;
+  static constexpr uint16_t DISPLAY_HEIGHT = CROSSPOINT_DISPLAY_HEIGHT;
+#else
   static constexpr uint16_t DISPLAY_WIDTH = EInkDisplay::DISPLAY_WIDTH;
   static constexpr uint16_t DISPLAY_HEIGHT = EInkDisplay::DISPLAY_HEIGHT;
+#endif
   static constexpr uint16_t DISPLAY_WIDTH_BYTES = DISPLAY_WIDTH / 8;
   static constexpr uint32_t BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT;
 
@@ -128,8 +141,10 @@ class HalDisplay {
   uint16_t getDisplayWidthBytes() const;
   uint32_t getBufferSize() const;
 
+#ifndef CROSSPOINT_CUSTOM_DISPLAY_HAL
  private:
   EInkDisplay einkDisplay;
+#endif
 };
 
 extern HalDisplay display;
