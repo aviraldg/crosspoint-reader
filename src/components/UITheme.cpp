@@ -2,6 +2,7 @@
 
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalMemory.h>
 #include <Logging.h>
@@ -30,7 +31,9 @@ void UITheme::reload() {
   setTheme(themeType);
 }
 
-bool UITheme::supportsCoverGrid() { return HalMemory::getPsramHeap().totalBytes > 0; }
+bool UITheme::supportsCoverGrid() {
+  return HalDisplay::DISPLAY_HEIGHT > 240 && HalMemory::getPsramHeap().totalBytes > 0;
+}
 
 bool UITheme::hasCoverGridHome() { return SETTINGS.uiTheme == CrossPointSettings::COVER_GRID && supportsCoverGrid(); }
 
@@ -78,6 +81,28 @@ const ThemeMetrics& UITheme::getMetrics() const {
   const bool touch = gpio.hasTouch();
   if (!metricsValid || touch != metricsForTouch) {
     adjustedMetrics = *currentMetrics;
+    if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+      adjustedMetrics.topPadding = std::min(adjustedMetrics.topPadding, 2);
+      adjustedMetrics.batteryBarHeight = std::min(adjustedMetrics.batteryBarHeight, 16);
+      adjustedMetrics.headerHeight = std::min(adjustedMetrics.headerHeight, 32);
+      adjustedMetrics.verticalSpacing = std::min(adjustedMetrics.verticalSpacing, 2);
+      adjustedMetrics.contentSidePadding = std::min(adjustedMetrics.contentSidePadding, 10);
+      adjustedMetrics.listSidePadding = std::min(adjustedMetrics.listSidePadding, 10);
+      adjustedMetrics.headerSidePadding = std::min(adjustedMetrics.headerSidePadding, 10);
+      adjustedMetrics.listRowHeight = std::min(adjustedMetrics.listRowHeight, 22);
+      adjustedMetrics.listWithSubtitleRowHeight = std::min(adjustedMetrics.listWithSubtitleRowHeight, 36);
+      adjustedMetrics.menuRowHeight = std::min(adjustedMetrics.menuRowHeight, 22);
+      adjustedMetrics.menuSpacing = std::min(adjustedMetrics.menuSpacing, 2);
+      adjustedMetrics.tabBarHeight = std::min(adjustedMetrics.tabBarHeight, 26);
+      adjustedMetrics.homeTopPadding = std::min(adjustedMetrics.homeTopPadding, 18);
+      adjustedMetrics.homeCoverHeight = std::min(adjustedMetrics.homeCoverHeight, 56);
+      adjustedMetrics.homeCoverTileHeight = std::min(adjustedMetrics.homeCoverTileHeight, 72);
+      adjustedMetrics.homeMenuTopOffset = std::min(adjustedMetrics.homeMenuTopOffset, 2);
+      adjustedMetrics.buttonHintsHeight = std::min(adjustedMetrics.buttonHintsHeight, 22);
+      adjustedMetrics.statusBarVerticalMargin = std::min(adjustedMetrics.statusBarVerticalMargin, 15);
+      adjustedMetrics.popupMarginX = std::min(adjustedMetrics.popupMarginX, 10);
+      adjustedMetrics.popupMarginY = std::min(adjustedMetrics.popupMarginY, 8);
+    }
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
     }
@@ -101,9 +126,15 @@ Rect UITheme::getContentArea(const GfxRenderer& renderer) {
 // Content area excluding the button hints.
 Rect UITheme::getScreenSafeArea(const GfxRenderer& renderer, bool hasFrontButtonHints, bool hasSideButtonHints) {
   auto orientation = renderer.getOrientation();
+#ifdef CROSSPOINT_DEFAULT_UI_ORIENTATION
+  const auto relativeOrientation = static_cast<GfxRenderer::Orientation>(
+      (static_cast<int>(orientation) - static_cast<int>(CROSSPOINT_DEFAULT_UI_ORIENTATION) + 4) % 4);
+#else
+  const auto relativeOrientation = orientation;
+#endif
   Rect safeArea = getContentArea(renderer);
   const ThemeMetrics metrics = getMetrics();
-  switch (orientation) {
+  switch (relativeOrientation) {
     case GfxRenderer::Orientation::Portrait:
       if (hasFrontButtonHints) {
         safeArea.height -= metrics.buttonHintsHeight;

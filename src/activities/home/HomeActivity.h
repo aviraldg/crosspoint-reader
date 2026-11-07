@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "CrossPointSettings.h"
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "components/CoverGridHomeUi.h"
@@ -47,8 +48,10 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
     if (hasOpdsUrl) ++i;
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
     ++i;
+#endif
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     return 0;
   }
@@ -59,7 +62,9 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
+#endif
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }

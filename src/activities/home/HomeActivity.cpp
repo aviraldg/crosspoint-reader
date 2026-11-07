@@ -27,7 +27,11 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
   int count = 4;  // File Browser, Library, File transfer, Settings
+#else
+  int count = 3;  // File Browser, Library, Settings
+#endif
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -524,9 +528,14 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
+#if CROSSPOINT_CAP_LOCAL_TRANSFER
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
                                         tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
+#else
+  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_SETTINGS_TITLE)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Settings};
+#endif
 
   if (hasLibrarySlot()) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
@@ -539,12 +548,14 @@ void HomeActivity::render(RenderLock&&) {
     menuIcons.insert(menuIcons.begin(), Book);
   }
 
+  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int menuHeight =
+      HalDisplay::DISPLAY_HEIGHT <= 240
+          ? pageHeight - (menuTop + metrics.buttonHintsHeight)
+          : pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
+                          metrics.homeMenuTopOffset + metrics.buttonHintsHeight);
   GUI.drawButtonMenu(
-      renderer,
-      Rect{content.x, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, content.width,
-           pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
-                         metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
-      static_cast<int>(menuItems.size()),
+      renderer, Rect{content.x, menuTop, content.width, menuHeight}, static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size(),
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });

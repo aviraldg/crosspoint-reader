@@ -222,15 +222,19 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
 
+  const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageHeight = renderer.getScreenHeight();
-  constexpr int buttonWidth = 106;
-  constexpr int buttonHeight = BaseMetrics::values.buttonHintsHeight;
-  constexpr int buttonY = BaseMetrics::values.buttonHintsHeight;  // Distance from bottom
+  const int screenWidth = renderer.getScreenWidth();
+  const int buttonWidth = screenWidth <= 400 ? 90 : 106;
+  const int buttonHeight = metrics.buttonHintsHeight;
+  const int buttonY = metrics.buttonHintsHeight;  // Distance from bottom
   // Keyed to the portrait panel width: the 528-wide X3 gets more spacing than
   // the 480-wide boards (X4, X4 Pro, and the other 800x480 panels).
+  constexpr int compactButtonPositions[] = {8, 106, 204, 302};
   constexpr int narrowButtonPositions[] = {25, 130, 245, 350};
   constexpr int wideButtonPositions[] = {38, 154, 268, 384};
-  const int* buttonPositions = renderer.getScreenWidth() >= 528 ? wideButtonPositions : narrowButtonPositions;
+  const int* buttonPositions =
+      screenWidth >= 528 ? wideButtonPositions : (screenWidth <= 400 ? compactButtonPositions : narrowButtonPositions);
   const char* labels[] = {btn1, btn2, btn3, btn4};
   const bool grayscale = renderer.getRenderMode() != GfxRenderer::BW && !renderer.grayPlanesAreAbsolute();
 
@@ -470,22 +474,23 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
 }
 
 void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
   constexpr int labelGap = 10;
-  const int contentWidth = std::max(0, rect.width - BaseMetrics::values.contentSidePadding * 2);
+  const int contentWidth = std::max(0, rect.width - metrics.contentSidePadding * 2);
 
   int labelWidth = contentWidth;
   if (rightLabel) {
     auto truncatedRightLabel = renderer.truncatedText(SMALL_FONT_ID, rightLabel, contentWidth, EpdFontFamily::REGULAR);
     const int rightLabelWidth = renderer.getTextWidth(SMALL_FONT_ID, truncatedRightLabel.c_str());
-    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - BaseMetrics::values.contentSidePadding - rightLabelWidth,
-                      rect.y + 7, truncatedRightLabel.c_str());
+    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - metrics.contentSidePadding - rightLabelWidth, rect.y + 7,
+                      truncatedRightLabel.c_str());
     labelWidth = std::max(0, contentWidth - rightLabelWidth - labelGap);
   }
 
   if (labelWidth > 0) {
     auto truncatedLabel = renderer.truncatedText(UI_12_FONT_ID, label, labelWidth, EpdFontFamily::REGULAR);
-    renderer.drawText(UI_12_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, rect.y, truncatedLabel.c_str(),
-                      true, EpdFontFamily::REGULAR);
+    renderer.drawText(UI_12_FONT_ID, rect.x + metrics.contentSidePadding, rect.y, truncatedLabel.c_str(), true,
+                      EpdFontFamily::REGULAR);
   }
 }
 
@@ -494,6 +499,7 @@ void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
 void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                     const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                     bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
   const bool hasContinueReading = !recentBooks.empty();
   const bool bookSelected = hasContinueReading && selectorIndex == 0;
 
@@ -507,8 +513,7 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
   if (hasContinueReading && !recentBooks[0].coverBmpPath.empty()) {
     // Try to get actual image dimensions from BMP header
-    const std::string coverBmpPath =
-        UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+    const std::string coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, metrics.homeCoverHeight);
 
     HalFile file;
     if (Storage.openFileForRead("HOME", coverBmpPath, file)) {
@@ -556,8 +561,7 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     // Only load from SD on first render, then use stored buffer
 
     if (hasContinueReading && !recentBooks[0].coverBmpPath.empty() && !coverRendered) {
-      const std::string coverBmpPath =
-          UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+      const std::string coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, metrics.homeCoverHeight);
 
       // First time: load cover from SD and render
       HalFile file;
@@ -632,6 +636,7 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     }
   }
 
+  const auto scale = uiScaleSpec();
   if (hasContinueReading) {
     const std::string& lastBookTitle = recentBooks[0].title;
     const std::string& lastBookAuthor = recentBooks[0].author;
@@ -640,12 +645,13 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     // - With cover: selected = white text on black box, unselected = black text on white box
     // - Without cover: selected = white text on black card, unselected = black text on white card
 
-    auto lines = renderer.wrappedText(UI_12_FONT_ID, lastBookTitle.c_str(), bookWidth - 40, 3);
+    const int maxTitleLines = metrics.homeCoverHeight < 100 ? 1 : 3;
+    auto lines = renderer.wrappedText(scale.bodyFontId, lastBookTitle.c_str(), bookWidth - 40, maxTitleLines);
 
     // Book title text
-    int totalTextHeight = renderer.getLineHeight(UI_12_FONT_ID) * static_cast<int>(lines.size());
+    int totalTextHeight = renderer.getLineHeight(scale.bodyFontId) * static_cast<int>(lines.size());
     if (!lastBookAuthor.empty()) {
-      totalTextHeight += renderer.getLineHeight(UI_10_FONT_ID) * 3 / 2;
+      totalTextHeight += renderer.getLineHeight(scale.smallFontId) * 3 / 2;
     }
 
     // Vertically center the title block within the card
@@ -653,7 +659,7 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
     const auto truncatedAuthor = lastBookAuthor.empty()
                                      ? std::string{}
-                                     : renderer.truncatedText(UI_10_FONT_ID, lastBookAuthor.c_str(), bookWidth - 40);
+                                     : renderer.truncatedText(scale.smallFontId, lastBookAuthor.c_str(), bookWidth - 40);
 
     // If cover image was rendered, draw box behind title and author
     if (coverRendered) {
@@ -661,13 +667,13 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       // Calculate the max text width for the box
       int maxTextWidth = 0;
       for (const auto& line : lines) {
-        const int lineWidth = renderer.getTextWidth(UI_12_FONT_ID, line.c_str());
+        const int lineWidth = renderer.getTextWidth(scale.bodyFontId, line.c_str());
         if (lineWidth > maxTextWidth) {
           maxTextWidth = lineWidth;
         }
       }
       if (!truncatedAuthor.empty()) {
-        const int authorWidth = renderer.getTextWidth(UI_10_FONT_ID, truncatedAuthor.c_str());
+        const int authorWidth = renderer.getTextWidth(scale.smallFontId, truncatedAuthor.c_str());
         if (authorWidth > maxTextWidth) {
           maxTextWidth = authorWidth;
         }
@@ -685,38 +691,39 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     }
 
     for (const auto& line : lines) {
-      renderer.drawCenteredText(UI_12_FONT_ID, titleYStart, line.c_str(), !bookSelected);
-      titleYStart += renderer.getLineHeight(UI_12_FONT_ID);
+      renderer.drawCenteredText(scale.bodyFontId, titleYStart, line.c_str(), !bookSelected);
+      titleYStart += renderer.getLineHeight(scale.bodyFontId);
     }
 
     if (!truncatedAuthor.empty()) {
-      titleYStart += renderer.getLineHeight(UI_10_FONT_ID) / 2;
-      renderer.drawCenteredText(UI_10_FONT_ID, titleYStart, truncatedAuthor.c_str(), !bookSelected);
+      titleYStart += renderer.getLineHeight(scale.smallFontId) / 2;
+      renderer.drawCenteredText(scale.smallFontId, titleYStart, truncatedAuthor.c_str(), !bookSelected);
     }
 
     // "Continue Reading" label at the bottom
-    const int continueY = bookY + bookHeight - renderer.getLineHeight(UI_10_FONT_ID) * 3 / 2;
+    const int continueY = bookY + bookHeight - renderer.getLineHeight(scale.smallFontId) * 3 / 2;
     if (coverRendered) {
       // Draw box behind "Continue Reading" text (inverted when selected: black box instead of white)
       const char* continueText = tr(STR_CONTINUE_READING);
-      const int continueTextWidth = renderer.getTextWidth(UI_10_FONT_ID, continueText);
+      const int continueTextWidth = renderer.getTextWidth(scale.smallFontId, continueText);
       constexpr int continuePadding = 6;
       const int continueBoxWidth = continueTextWidth + continuePadding * 2;
-      const int continueBoxHeight = renderer.getLineHeight(UI_10_FONT_ID) + continuePadding;
+      const int continueBoxHeight = renderer.getLineHeight(scale.smallFontId) + continuePadding;
       const int continueBoxX = rect.x + (rect.width - continueBoxWidth) / 2;
       const int continueBoxY = continueY - continuePadding / 2;
       renderer.fillRect(continueBoxX, continueBoxY, continueBoxWidth, continueBoxHeight, bookSelected);
       renderer.drawRect(continueBoxX, continueBoxY, continueBoxWidth, continueBoxHeight, !bookSelected);
-      renderer.drawCenteredText(UI_10_FONT_ID, continueY, continueText, !bookSelected);
+      renderer.drawCenteredText(scale.smallFontId, continueY, continueText, !bookSelected);
     } else {
-      renderer.drawCenteredText(UI_10_FONT_ID, continueY, tr(STR_CONTINUE_READING), !bookSelected);
+      renderer.drawCenteredText(scale.smallFontId, continueY, tr(STR_CONTINUE_READING), !bookSelected);
     }
   } else {
     // No book to continue reading
-    const int y =
-        bookY + (bookHeight - renderer.getLineHeight(UI_12_FONT_ID) - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
-    renderer.drawCenteredText(UI_12_FONT_ID, y, tr(STR_NO_OPEN_BOOK));
-    renderer.drawCenteredText(UI_10_FONT_ID, y + renderer.getLineHeight(UI_12_FONT_ID), tr(STR_START_READING));
+    const int y = bookY +
+                  (bookHeight - renderer.getLineHeight(scale.bodyFontId) - renderer.getLineHeight(scale.smallFontId)) /
+                      2;
+    renderer.drawCenteredText(scale.bodyFontId, y, tr(STR_NO_OPEN_BOOK));
+    renderer.drawCenteredText(scale.smallFontId, y + renderer.getLineHeight(scale.bodyFontId), tr(STR_START_READING));
   }
 }
 
@@ -725,18 +732,20 @@ int BaseTheme::getMenuRowHeight(const GfxRenderer&) const { return UITheme::getI
 void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                const std::function<std::string(int index)>& buttonLabel,
                                const std::function<UIIcon(int index)>& rowIcon) const {
+  (void)rowIcon;
+  const auto& metrics = UITheme::getInstance().getMetrics();
   for (int i = 0; i < buttonCount; ++i) {
-    const int tileY = BaseMetrics::values.verticalSpacing + rect.y +
-                      static_cast<int>(i) * (BaseMetrics::values.menuRowHeight + BaseMetrics::values.menuSpacing);
+    const int tileY =
+        metrics.verticalSpacing + rect.y + static_cast<int>(i) * (metrics.menuRowHeight + metrics.menuSpacing);
 
     const bool selected = selectedIndex == i;
 
     if (selected) {
-      renderer.fillRect(rect.x + BaseMetrics::values.contentSidePadding, tileY,
-                        rect.width - BaseMetrics::values.contentSidePadding * 2, BaseMetrics::values.menuRowHeight);
+      renderer.fillRect(rect.x + metrics.contentSidePadding, tileY, rect.width - metrics.contentSidePadding * 2,
+                        metrics.menuRowHeight);
     } else {
-      renderer.drawRect(rect.x + BaseMetrics::values.contentSidePadding, tileY,
-                        rect.width - BaseMetrics::values.contentSidePadding * 2, BaseMetrics::values.menuRowHeight);
+      renderer.drawRect(rect.x + metrics.contentSidePadding, tileY, rect.width - metrics.contentSidePadding * 2,
+                        metrics.menuRowHeight);
     }
 
     std::string labelStr = buttonLabel(i);
@@ -745,7 +754,7 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     const int textX = rect.x + (rect.width - textWidth) / 2;
     const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
     const int textY =
-        tileY + (BaseMetrics::values.menuRowHeight - lineHeight) / 2;  // vertically centered assuming y is top of text
+        tileY + (metrics.menuRowHeight - lineHeight) / 2;  // vertically centered assuming y is top of text
     // Invert text when the tile is selected, to contrast with the filled background
     renderer.drawText(UI_10_FONT_ID, textX, textY, label, selectedIndex != i);
   }

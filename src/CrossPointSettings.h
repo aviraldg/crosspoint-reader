@@ -9,6 +9,22 @@
 
 #include "util/HomeButtonInput.h"
 
+#ifndef CROSSPOINT_CAP_LOCAL_TRANSFER
+#define CROSSPOINT_CAP_LOCAL_TRANSFER 1
+#endif
+#ifndef CROSSPOINT_CAP_OTA
+#define CROSSPOINT_CAP_OTA 1
+#endif
+#ifndef CROSSPOINT_CAP_WIFI_SELECT
+#define CROSSPOINT_CAP_WIFI_SELECT 1
+#endif
+#ifndef CROSSPOINT_DEFAULT_READER_ORIENTATION
+#define CROSSPOINT_DEFAULT_READER_ORIENTATION PORTRAIT
+#endif
+#ifndef CROSSPOINT_DEFAULT_FONT_POINT_SIZE
+#define CROSSPOINT_DEFAULT_FONT_POINT_SIZE 14
+#endif
+
 class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  private:
   // Private constructor for singleton
@@ -118,7 +134,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Legacy 1.4-and-earlier files stored a 0..3 SMALL/MEDIUM/LARGE/EXTRA_LARGE
   // slot; fromJson() folds that range up (see LEGACY_FONT_SIZE_MAX).
   static constexpr uint8_t LEGACY_FONT_SIZE_MAX = 3;
-  static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = 14;
+  static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = CROSSPOINT_DEFAULT_FONT_POINT_SIZE;
   // Line height as a percent of font size.
   enum LINE_COMPRESSION {
     LINE_SPACING_100 = 0,
@@ -306,7 +322,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t homeButtonLongPressAction = static_cast<uint8_t>(HomeButtonAction::ReaderMenu);
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
-  uint8_t orientation = PORTRAIT;
+  uint8_t orientation = CROSSPOINT_DEFAULT_READER_ORIENTATION;
   // Button layouts (front layout retained for migration only)
   uint8_t frontButtonLayout = BACK_CONFIRM_LEFT_RIGHT;
   uint8_t sideButtonLayout = PREV_NEXT;
