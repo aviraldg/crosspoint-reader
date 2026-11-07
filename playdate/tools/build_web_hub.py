@@ -735,8 +735,8 @@ def main():
           this.lineWaiters.length = 0;
           this.rxLineQueue.length = 0;
           const cmdLabel = cpArgs.split(" ")[0];
-          if (isVerboseSerialEnabled() || (cmdLabel !== "WDATA" && cmdLabel !== "WFLUSH")) {{
-            hubLog("debug", "serial-tx", "!CP " + (cmdLabel === "WDATA" ? `WDATA <${{cpArgs.length - 6}} b64 chars>` : cpArgs));
+          if (isVerboseSerialEnabled() || (cmdLabel !== "WDATA" && cmdLabel !== "WCHUNK" && cmdLabel !== "WFLUSH")) {{
+            hubLog("debug", "serial-tx", "!CP " + ((cmdLabel === "WDATA" || cmdLabel === "WCHUNK") ? `${{cmdLabel}} <${{cpArgs.length - cmdLabel.length - 1}} b64 chars>` : cpArgs));
           }}
           const payload = new TextEncoder().encode("msg !CP " + cpArgs + "\\r\\n");
           await this.writer.write(payload);
@@ -765,6 +765,23 @@ def main():
         return next;
       }}
 
+      async _cmdWithRetry(cpArgs, timeoutMs = 8000, maxAttempts = 3) {{
+        const cmdLabel = cpArgs.split(" ")[0];
+        let lastErr = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {{
+          try {{
+            return await this._cmd(cpArgs, timeoutMs);
+          }} catch (e) {{
+            lastErr = e;
+            if (attempt < maxAttempts) {{
+              hubLog("warn", "serial-retry", `Retrying !CP ${{cmdLabel}} (attempt ${{attempt + 1}}/${{maxAttempts}}) after error: ${{e.message || e}}`);
+              await new Promise(r => setTimeout(r, 200 * attempt));
+            }}
+          }}
+        }}
+        throw lastErr;
+      }}
+
       async ping() {{
         try {{
           const {{ ok, rest }} = await this._cmd("PING", 3000);
@@ -784,7 +801,7 @@ def main():
 
       async stat(vpath) {{
         vpath = normalizeVPath(vpath);
-        const {{ ok, rest }} = await this._cmd("STAT " + vpath);
+        const {{ ok, rest }} = await this._cmdWithRetry("STAT " + vpath, 8000, 3);
         if (!ok) return {{ exists: false, isDir: false, size: 0 }};
         try {{
           const doc = JSON.parse(rest);
@@ -805,7 +822,7 @@ def main():
 
       async listDir(vpath) {{
         vpath = normalizeVPath(vpath);
-        const {{ ok, items }} = await this._cmd("LIST " + vpath);
+        const {{ ok, items }} = await this._cmdWithRetry("LIST " + vpath, 8000, 3);
         if (!ok) return [];
         const out = [];
         for (const raw of items) {{
@@ -826,7 +843,7 @@ def main():
         let offset = 0;
         const step = 4096;
         while (offset < totalSize || (totalSize === 0 && offset === 0)) {{
-          const {{ ok, rest, dataChunks }} = await this._cmd(`READ ${{offset}} ${{step}} ${{vpath}}`, 12000);
+          const {{ ok, rest, dataChunks }} = await this._cmdWithRetry(`READ ${{offset}} ${{step}} ${{vpath}}`, 12000, 3);
           if (!ok) throw new Error("Serial READ failed: " + rest);
           const b64 = dataChunks.join("");
           const part = b64 ? base64ToUint8(b64) : new Uint8Array(0);
@@ -848,8 +865,91 @@ def main():
         const runWrite = async () => {{
           vpath = normalizeVPath(vpath);
           const bytes = dataBytes instanceof Uint8Array ? dataBytes : new Uint8Array(dataBytes);
-          const openRes = await this._cmd("WOPEN " + vpath);
+          const fileName = vpath.split("/").pop() || vpath;
+          const isLarge = bytes.length >= 8192;
+          const t0 = performance.now();
+          let lastProgressBytes = 0;
+          let lastProgressTime = t0;
+          const reportProgress = (writtenBytes, force = false) => {{
+            if (!isLarge) return;
+            const now = performance.now();
+            if (!force && (writtenBytes - lastProgressBytes < 32768) && (now - lastProgressTime < 4000)) return;
+            lastProgressBytes = writtenBytes;
+            lastProgressTime = now;
+            const elapsedSec = Math.max(0.05, (now - t0) / 1000);
+            const kbps = ((writtenBytes / 1024) / elapsedSec).toFixed(1);
+            const pct = bytes.length > 0 ? Math.min(100, Math.round((writtenBytes * 100) / bytes.length)) : 100;
+            hubLog("info", "serial-write", `Writing ${{fileName}}: ${{(writtenBytes / 1024).toFixed(1)}} KB / ${{(bytes.length / 1024).toFixed(1)}} KB (${{pct}}%, ${{kbps}} KB/s)`);
+            if (typeof showWebToast === "function") {{
+              showWebToast(`Writing ${{fileName}}: ${{pct}}% (${{kbps}} KB/s)`);
+            }}
+          }};
+
+          if (isLarge) {{
+            hubLog("info", "serial-write", `Starting write of ${{vpath}} (${{(bytes.length / 1024).toFixed(1)}} KB)…`);
+          }}
+
+          const openRes = await this._cmdWithRetry("WOPEN " + vpath, 8000, 3);
           if (!openRes.ok) throw new Error("Serial WOPEN failed: " + openRes.rest);
+
+          if (this._supportsWchunk !== false && bytes.length > 0) {{
+            // Fast single-command WCHUNK path: 168 raw bytes = 224 base64 chars per command
+            // ("msg !CP WCHUNK <224>\\r\\n" = 241 bytes < Playdate 256-byte serial msg buffer).
+            const chunkStep = 168;
+            let useLegacyFallback = false;
+            for (let i = 0; i < bytes.length; i += chunkStep) {{
+              const slice = bytes.subarray(i, i + chunkStep);
+              const b64 = uint8ToBase64(slice);
+              let chunkDone = false;
+              for (let attempt = 1; attempt <= 3 && !chunkDone; attempt++) {{
+                try {{
+                  const res = await this._cmd("WCHUNK " + b64, 8000);
+                  if (!res.ok) {{
+                    if (i === 0 && res.rest && res.rest.includes("unknown command")) {{
+                      this._supportsWchunk = false;
+                      useLegacyFallback = true;
+                      break;
+                    }}
+                    throw new Error("Serial WCHUNK failed: " + res.rest);
+                  }}
+                  this._supportsWchunk = true;
+                  chunkDone = true;
+                }} catch (err) {{
+                  if (attempt >= 3) throw err;
+                  hubLog("warn", "serial-retry", `WCHUNK timeout/error at offset ${{i}} (attempt ${{attempt}}/3), checking device write offset…`);
+                  await new Promise(r => setTimeout(r, 250 * attempt));
+                  try {{
+                    const fl = await this._cmd("WFLUSH", 5000);
+                    if (fl.ok) {{
+                      const flDoc = JSON.parse(fl.rest || "{{}}");
+                      if (Number(flDoc.written) === i + slice.length) {{
+                        // Chunk was already received and buffered by Playdate!
+                        chunkDone = true;
+                        break;
+                      }}
+                    }}
+                  }} catch {{}}
+                }}
+              }}
+              if (useLegacyFallback) break;
+              reportProgress(Math.min(bytes.length, i + slice.length));
+            }}
+            if (!useLegacyFallback) {{
+              const cl = await this._cmdWithRetry("WCLOSE", 10000, 3);
+              if (!cl.ok) throw new Error("Serial WCLOSE failed: " + cl.rest);
+              if (isLarge) {{
+                const totalSec = Math.max(0.05, (performance.now() - t0) / 1000);
+                const kbps = ((bytes.length / 1024) / totalSec).toFixed(1);
+                hubLog("info", "serial-write", `Completed ${{vpath}} (${{(bytes.length / 1024).toFixed(1)}} KB in ${{totalSec.toFixed(1)}}s, ${{kbps}} KB/s)`);
+              }}
+              return;
+            }}
+            // Re-open cleanly for legacy fallback
+            const reopenRes = await this._cmdWithRetry("WOPEN " + vpath, 8000, 3);
+            if (!reopenRes.ok) throw new Error("Serial WOPEN failed: " + reopenRes.rest);
+          }}
+
+          // Legacy fallback (WDATA 120B + WFLUSH) for older Playdate binaries
           const step = 120;
           const flushThreshold = bytes.length <= 2048 ? step : 240;
           let sinceFlush = 0;
@@ -866,13 +966,19 @@ def main():
             await next;
             sinceFlush += slice.length;
             if (sinceFlush >= flushThreshold) {{
-              const fl = await this._cmd("WFLUSH", 8000);
+              const fl = await this._cmdWithRetry("WFLUSH", 8000, 3);
               if (!fl.ok) throw new Error("Serial WFLUSH failed: " + fl.rest);
               sinceFlush = 0;
+              reportProgress(Math.min(bytes.length, i + slice.length));
             }}
           }}
-          const cl = await this._cmd("WCLOSE", 8000);
+          const cl = await this._cmdWithRetry("WCLOSE", 10000, 3);
           if (!cl.ok) throw new Error("Serial WCLOSE failed: " + cl.rest);
+          if (isLarge) {{
+            const totalSec = Math.max(0.05, (performance.now() - t0) / 1000);
+            const kbps = ((bytes.length / 1024) / totalSec).toFixed(1);
+            hubLog("info", "serial-write", `Completed ${{vpath}} (${{(bytes.length / 1024).toFixed(1)}} KB in ${{totalSec.toFixed(1)}}s, ${{kbps}} KB/s)`);
+          }}
         }};
         this.writeMutex = (this.writeMutex || Promise.resolve()).then(runWrite, runWrite);
         return this.writeMutex;
@@ -1236,6 +1342,33 @@ def main():
       }});
     }}
 
+    async function fetchWithTimeoutAndRetry(doFetch, url, fetchOpts, timeoutMs = 30000, maxAttempts = 3) {{
+      let lastErr = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {{
+        const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(new Error(`HTTP timeout after ${{timeoutMs}}ms`)), timeoutMs) : null;
+        try {{
+          const opts = ctrl ? Object.assign({{}}, fetchOpts, {{ signal: ctrl.signal }}) : fetchOpts;
+          const resp = await doFetch(url, opts);
+          if ((resp.status === 429 || resp.status >= 502) && attempt < maxAttempts) {{
+            hubLog("warn", "http-retry", `HTTP ${{resp.status}} from ${{url}}, retrying (${{attempt + 1}}/${{maxAttempts}})…`);
+            await new Promise(r => setTimeout(r, 400 * attempt));
+            continue;
+          }}
+          return resp;
+        }} catch (err) {{
+          lastErr = err;
+          if (attempt < maxAttempts) {{
+            hubLog("warn", "http-retry", `Fetch error for ${{url}} (attempt ${{attempt}}/${{maxAttempts}}): ${{err.message || err}}`);
+            await new Promise(r => setTimeout(r, 400 * attempt));
+          }}
+        }} finally {{
+          if (timer) clearTimeout(timer);
+        }}
+      }}
+      throw lastErr;
+    }}
+
     async function performOutboundFetch(url, method, headersObj, bodyStr) {{
       const doFetch = window.__outboundFetch || nativeFetch;
       const fetchOpts = {{
@@ -1248,7 +1381,7 @@ def main():
         fetchOpts.body = bodyStr;
       }}
       try {{
-        return await doFetch(url, fetchOpts);
+        return await fetchWithTimeoutAndRetry(doFetch, url, fetchOpts, 30000, 2);
       }} catch (directErr) {{
         // Fallback 1: If connected to Playdate via Web Serial, relay the HTTP(S) request
         // directly through the Playdate's own Wi-Fi stack (`!CP RELAY`)!
@@ -1270,7 +1403,7 @@ def main():
         }}
         // Fallback 2: Public CORS proxy for Data Disk mode when endpoint lacks CORS headers
         const proxyUrl = "https://corsproxy.io/?url=" + encodeURIComponent(url);
-        return await doFetch(proxyUrl, fetchOpts);
+        return await fetchWithTimeoutAndRetry(doFetch, proxyUrl, fetchOpts, 30000, 2);
       }}
     }}
 
@@ -1389,7 +1522,7 @@ def main():
             if (reqMethod !== "GET" && reqMethod !== "HEAD" && reqBody) {{
               fetchOpts.body = reqBody;
             }}
-            up = await doFetch(targetUrl, fetchOpts);
+            up = await fetchWithTimeoutAndRetry(doFetch, targetUrl, fetchOpts, 30000, 3);
           }} catch (corsErr) {{
             if (activeBackend && typeof activeBackend.relayHttp === "function") {{
               const rel = await activeBackend.relayHttp({{
