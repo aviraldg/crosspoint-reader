@@ -3,7 +3,7 @@
 Builds the standalone CrossPoint Playdate Web Hub (`playdate_web_hub.html`),
 embedding CrossPoint's official CSS, SVG icons, JSZip, and `plugin-host.js`
 together with an in-browser Web Serial (`navigator.serial`) + File System
-Access (`window.showDirectoryPicker`) virtual `/api/*` server.
+Access (`window.showDirectoryPicker`) virtual `/api/*` server and debug logger.
 """
 
 import base64
@@ -26,8 +26,35 @@ def main():
     jszip_js = read_text("js/jszip.min.js").replace("</script>", "<\\/script>")
     plugin_host_js = read_text("js/plugin-host.js").replace("</script>", "<\\/script>")
 
-    # Adapt `plugin-host.js` so `<script src="/plugin?...">` loads via `fetch()` + `Blob` URL
-    # when running in standalone Web Serial / File System Access mode!
+    # 1. Patch `loadPlugins` in `plugin-host.js` so errors fetching `/api/plugins` are logged
+    #    to the console and hub debug panel instead of failing silently.
+    old_fetch_list = """  let list;
+  try { list = await (await fetch('/api/plugins')).json(); } catch (e) { return false; }
+  if (!Array.isArray(list)) return false;  // e.g. {"error":"out of memory"}"""
+
+    new_fetch_list = """  let list;
+  try {
+    const r = await fetch('/api/plugins');
+    list = await r.json();
+    if (!r.ok || !Array.isArray(list)) {
+      const msg = (list && list.error) ? list.error : ('HTTP ' + r.status + ': expected array from /api/plugins');
+      window.__lastPluginLoadError = msg;
+      if (typeof hubLog === 'function') hubLog('error', 'plugin-host', 'Failed to load /api/plugins: ' + msg, list);
+      else console.error('[plugin-host] Failed to load /api/plugins:', msg, list);
+      return false;
+    }
+  } catch (e) {
+    window.__lastPluginLoadError = (e && e.message) ? e.message : String(e);
+    if (typeof hubLog === 'function') hubLog('error', 'plugin-host', 'Exception fetching /api/plugins: ' + window.__lastPluginLoadError, e);
+    else console.error('[plugin-host] Exception fetching /api/plugins:', e);
+    return false;
+  }"""
+
+    assert old_fetch_list in plugin_host_js, "Expected /api/plugins fetch snippet in plugin-host.js"
+    plugin_host_js = plugin_host_js.replace(old_fetch_list, new_fetch_list, 1)
+
+    # 2. Adapt `plugin-host.js` so `<script src="/plugin?...">` loads via `fetch()` + `Blob` URL
+    #    when running in standalone Web Serial / File System Access mode (`file://` or static `https://`).
     old_loader_snippet = """    s.src = '/plugin?name=' + encodeURIComponent(p.name) + '&file=plugin.js';
     document.body.appendChild(s);"""
 
@@ -39,6 +66,8 @@ def main():
       const blob = new Blob([codeText + '\\n//# sourceURL=' + pluginScriptUrl], { type: 'application/javascript' });
       s.src = URL.createObjectURL(blob);
     } catch (err) {
+      if (typeof hubLog === 'function') hubLog('error', 'plugin-host', 'Failed to fetch ' + pluginScriptUrl + ': ' + (err.message || err), err);
+      else console.error('[plugin-host] Failed to fetch', pluginScriptUrl, err);
       showFailure();
       continue;
     }
@@ -143,13 +172,6 @@ def main():
       border-left: 4px solid #f2c94c;
       background: var(--card-bg, #fff);
     }}
-    .pd-quick-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 10px;
-      align-items: center;
-    }}
     .file-table {{
       width: 100%;
       border-collapse: collapse;
@@ -168,17 +190,48 @@ def main():
     .folder-link:hover, .file-link:hover {{
       text-decoration: underline;
     }}
-    .item-box {{
-      border: 1px solid var(--border-color, #ddd);
-      border-radius: 6px;
-      padding: 12px;
-      margin: 10px 0;
+    .debug-drawer {{
+      margin-top: 20px;
+      border: 1px solid var(--border-color, #d6d3d1);
+      border-radius: 8px;
+      background: #14171c;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8rem;
     }}
-    .item-actions {{
+    .debug-drawer summary {{
+      cursor: pointer;
+      padding: 10px 14px;
+      font-weight: 600;
+      color: #f2c94c;
+      user-select: none;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }}
+    .debug-toolbar {{
       display: flex;
       gap: 8px;
-      margin-top: 8px;
+      padding: 6px 14px;
+      border-top: 1px solid #262c36;
+      border-bottom: 1px solid #262c36;
+      background: #1b2028;
+      align-items: center;
+      flex-wrap: wrap;
     }}
+    .debug-log-output {{
+      max-height: 280px;
+      overflow-y: auto;
+      padding: 10px 14px;
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.45;
+    }}
+    .log-line-error {{ color: #ff6b6b; }}
+    .log-line-warn {{ color: #feca57; }}
+    .log-line-info {{ color: #93c5fd; }}
+    .log-line-debug {{ color: #94a3b8; }}
   </style>
 </head>
 <body class="web-ui">
@@ -248,7 +301,7 @@ def main():
     <!-- TAB 1: PLUGINS (/plugins) -->
     <section id="tab-plugins" class="hub-section active">
       <div id="plugin-container"></div>
-      <div class="card" id="empty-state" hidden>
+      <div class="card" id="empty-state">
         <p class="empty-state" id="empty-state-msg">
           Connect your Playdate above to load installed web plugins.
         </p>
@@ -306,6 +359,22 @@ def main():
         </div>
       </div>
     </section>
+
+    <!-- Built-in Diagnostics & Debug Log Drawer -->
+    <details class="debug-drawer" id="debugDrawer">
+      <summary>
+        <span>Diagnostics &amp; Debug Console (<span id="debugLogCount">0</span> events)</span>
+        <span style="font-size:0.75rem;color:#94a3b8;">Click to expand/collapse</span>
+      </summary>
+      <div class="debug-toolbar">
+        <button type="button" class="btn-small" onclick="copyDebugLogs()">Copy Logs</button>
+        <button type="button" class="btn-small" onclick="clearDebugLogs()">Clear</button>
+        <label style="font-size:0.78rem;color:#cbd5e1;display:flex;align-items:center;gap:4px;">
+          <input type="checkbox" id="chkVerboseSerial" /> Verbose Serial Wire Logs
+        </label>
+      </div>
+      <pre class="debug-log-output" id="debugLogOutput"></pre>
+    </details>
   </main>
 
   <!-- Standard CrossPoint Footer + Dialog/Toast -->
@@ -340,9 +409,9 @@ def main():
 {jszip_js}
   </script>
 
-  <!-- Dialog & Toast Helpers -->
+  <!-- Dialog, Toast & Diagnostics Logger -->
   <script>
-    document.cookie = "cpPlugins=1; path=/; SameSite=Strict";
+    try {{ document.cookie = "cpPlugins=1; path=/; SameSite=Strict"; }} catch {{}}
     const webMessageDialog = document.getElementById('webMessageDialog');
     const webDialogTitle = document.getElementById('webDialogTitle');
     const webDialogMessage = document.getElementById('webDialogMessage');
@@ -380,9 +449,83 @@ def main():
       webToast.style.display = 'block';
       webToastTimeout = setTimeout(() => {{ webToast.style.display = 'none'; }}, 4500);
     }}
+
+    // Structured Diagnostics Logger
+    window.__hubLogs = [];
+    function hubLog(level, category, message, detail) {{
+      const ts = new Date().toISOString().slice(11, 23);
+      const entry = {{ ts, level, category, message: String(message), detail }};
+      window.__hubLogs.push(entry);
+      const prefix = `[${{ts}}] [${{level.toUpperCase()}}] [${{category}}] ${{message}}`;
+      if (level === "error") console.error(prefix, detail !== undefined ? detail : "");
+      else if (level === "warn") console.warn(prefix, detail !== undefined ? detail : "");
+      else if (level === "info") console.info(prefix, detail !== undefined ? detail : "");
+      else console.debug(prefix, detail !== undefined ? detail : "");
+
+      const outEl = document.getElementById("debugLogOutput");
+      const countEl = document.getElementById("debugLogCount");
+      if (countEl) countEl.textContent = String(window.__hubLogs.length);
+      if (outEl) {{
+        const span = document.createElement("div");
+        span.className = "log-line-" + level;
+        let lineText = prefix;
+        if (detail !== undefined && detail !== null && detail !== "") {{
+          if (detail instanceof Error) {{
+            lineText += " — " + (detail.stack || detail.message);
+          }} else if (typeof detail === "object") {{
+            try {{ lineText += " " + JSON.stringify(detail); }} catch {{}}
+          }} else {{
+            lineText += " " + String(detail);
+          }}
+        }}
+        span.textContent = lineText;
+        outEl.appendChild(span);
+        outEl.scrollTop = outEl.scrollHeight;
+      }}
+      if (level === "error") {{
+        const drawer = document.getElementById("debugDrawer");
+        if (drawer) drawer.open = true;
+      }}
+    }}
+
+    function clearDebugLogs() {{
+      window.__hubLogs.length = 0;
+      const outEl = document.getElementById("debugLogOutput");
+      const countEl = document.getElementById("debugLogCount");
+      if (outEl) outEl.replaceChildren();
+      if (countEl) countEl.textContent = "0";
+    }}
+
+    async function copyDebugLogs() {{
+      const text = window.__hubLogs.map(e => {{
+        let s = `[${{e.ts}}] [${{e.level.toUpperCase()}}] [${{e.category}}] ${{e.message}}`;
+        if (e.detail !== undefined) {{
+          try {{ s += " " + (e.detail instanceof Error ? (e.detail.stack || e.detail.message) : JSON.stringify(e.detail)); }} catch {{}}
+        }}
+        return s;
+      }}).join("\\n");
+      try {{
+        await navigator.clipboard.writeText(text);
+        showWebToast("Copied debug logs to clipboard!", false);
+      }} catch {{
+        showWebToast("Could not copy to clipboard — select text in console drawer.", true);
+      }}
+    }}
+
+    window.addEventListener("error", (ev) => {{
+      hubLog("error", "window.onerror", ev.message || "Uncaught script error", {{
+        filename: ev.filename,
+        lineno: ev.lineno,
+        colno: ev.colno
+      }});
+    }});
+    window.addEventListener("unhandledrejection", (ev) => {{
+      const reason = ev.reason;
+      hubLog("error", "unhandledrejection", (reason && reason.message) ? reason.message : String(reason), reason);
+    }});
   </script>
 
-  <!-- Playdate Storage Backends (Web Serial + File System Access + Local Host) & Virtual /api/* Router -->
+  <!-- Playdate Storage Backends (Web Serial + File System Access) & Virtual /api/* Router -->
   <script>
     const nativeFetch = window.fetch.bind(window);
     const PLAYDATE_MAC_KEY = new Uint8Array([0x02, 0x00, 0x50, 0x44, 0x00, 0x01]);
@@ -455,6 +598,11 @@ def main():
       document.getElementById("pdTargetLabel").textContent = subtitle;
     }}
 
+    function isVerboseSerialEnabled() {{
+      const el = document.getElementById("chkVerboseSerial");
+      return !!(el && el.checked);
+    }}
+
     // ---- 1. Web Serial Storage Backend (`navigator.serial` -> `PlaydateSerialBridge`) ----
     class WebSerialBackend {{
       constructor(port) {{
@@ -462,6 +610,7 @@ def main():
         this.modeName = "Live USB Serial";
         this.targetDescription = "Playdate USB CDC Serial (115200 baud)";
         this.rxBuffer = "";
+        this.rxLineQueue = [];
         this.lineWaiters = [];
         this.reader = null;
         this.writer = null;
@@ -469,15 +618,43 @@ def main():
       }}
 
       async open() {{
+        hubLog("info", "serial", "Opening Web Serial port at 115200 baud…");
         await this.port.open({{ baudRate: 115200 }});
+        try {{
+          if (typeof this.port.setSignals === "function") {{
+            await this.port.setSignals({{ dataTerminalReady: true, requestToSend: true }});
+          }}
+        }} catch (sigErr) {{
+          hubLog("debug", "serial", "setSignals not supported or ignored", sigErr);
+        }}
         this.writer = this.port.writable.getWriter();
         this._startReadLoop();
         const ok = await this.ping();
         if (!ok) {{
+          await this.close();
           throw new Error(
             "Connected to serial port, but CrossPoint did not respond to !CP PING. " +
-            "Make sure CrossPoint Reader is open on your Playdate!"
+            "Make sure CrossPoint Reader (with Serial Bridge support) is open on your Playdate!"
           );
+        }}
+      }}
+
+      async close() {{
+        try {{ if (this.reader) await this.reader.cancel(); }} catch {{}}
+        try {{ if (this.reader) this.reader.releaseLock(); }} catch {{}}
+        try {{ if (this.writer) this.writer.releaseLock(); }} catch {{}}
+        try {{ await this.port.close(); }} catch {{}}
+      }}
+
+      _deliverCpLine(line) {{
+        if (isVerboseSerialEnabled()) {{
+          hubLog("debug", "serial-rx", line);
+        }}
+        if (this.lineWaiters.length > 0) {{
+          const w = this.lineWaiters.shift();
+          w.resolve(line);
+        }} else {{
+          this.rxLineQueue.push(line);
         }}
       }}
 
@@ -495,15 +672,16 @@ def main():
                 while ((nl = this.rxBuffer.indexOf("\\n")) !== -1) {{
                   const line = this.rxBuffer.slice(0, nl).replace(/\\r$/, "");
                   this.rxBuffer = this.rxBuffer.slice(nl + 1);
-                  if (line.includes("@CP ") && this.lineWaiters.length > 0) {{
-                    const w = this.lineWaiters.shift();
-                    w.resolve(line);
+                  if (line.includes("@CP ")) {{
+                    this._deliverCpLine(line);
+                  }} else if (line.trim() && isVerboseSerialEnabled()) {{
+                    hubLog("debug", "serial-console", line);
                   }}
                 }}
               }}
             }}
           }} catch (e) {{
-            console.warn("WebSerial read loop ended:", e);
+            hubLog("warn", "serial", "WebSerial read loop ended: " + (e.message || e));
             while (this.lineWaiters.length > 0) {{
               this.lineWaiters.shift().reject(e);
             }}
@@ -511,12 +689,15 @@ def main():
         }})();
       }}
 
-      _nextCpLine(timeoutMs = 6000) {{
+      _nextCpLine(timeoutMs = 8000, cmdLabel = "") {{
+        if (this.rxLineQueue.length > 0) {{
+          return Promise.resolve(this.rxLineQueue.shift());
+        }}
         return new Promise((resolve, reject) => {{
           const timer = setTimeout(() => {{
             const idx = this.lineWaiters.findIndex(w => w.resolve === wrappedResolve);
             if (idx !== -1) this.lineWaiters.splice(idx, 1);
-            reject(new Error("Timed out waiting for Playdate USB Serial response"));
+            reject(new Error(`Timed out waiting for Playdate USB Serial response (${{cmdLabel || "command"}})`));
           }}, timeoutMs);
           const wrappedResolve = (line) => {{
             clearTimeout(timer);
@@ -530,15 +711,20 @@ def main():
         }});
       }}
 
-      _cmd(cpArgs, timeoutMs = 6000) {{
+      _cmd(cpArgs, timeoutMs = 8000) {{
         const run = async () => {{
           this.lineWaiters.length = 0;
-          const payload = new TextEncoder().encode("msg !CP " + cpArgs + "\\n");
+          this.rxLineQueue.length = 0;
+          const cmdLabel = cpArgs.split(" ")[0];
+          if (isVerboseSerialEnabled() || (cmdLabel !== "WDATA" && cmdLabel !== "WFLUSH")) {{
+            hubLog("debug", "serial-tx", "!CP " + (cmdLabel === "WDATA" ? `WDATA <${{cpArgs.length - 6}} b64 chars>` : cpArgs));
+          }}
+          const payload = new TextEncoder().encode("msg !CP " + cpArgs + "\\r\\n");
           await this.writer.write(payload);
           const items = [];
           const dataChunks = [];
           while (true) {{
-            const line = await this._nextCpLine(timeoutMs);
+            const line = await this._nextCpLine(timeoutMs, cpArgs);
             const idx = line.indexOf("@CP ");
             if (idx === -1) continue;
             const resp = line.slice(idx + 4);
@@ -549,7 +735,9 @@ def main():
             }} else if (resp.startsWith("OK")) {{
               return {{ ok: true, rest: resp.slice(2).trim(), items, dataChunks }};
             }} else if (resp.startsWith("ERR")) {{
-              return {{ ok: false, rest: resp.slice(3).trim(), items, dataChunks }};
+              const errRest = resp.slice(3).trim();
+              hubLog("debug", "serial-err", `!CP ${{cpArgs}} -> ERR ${{errRest}}`);
+              return {{ ok: false, rest: errRest, items, dataChunks }};
             }}
           }}
         }};
@@ -560,12 +748,14 @@ def main():
 
       async ping() {{
         try {{
-          const {{ ok, rest }} = await this._cmd("PING", 2500);
+          const {{ ok, rest }} = await this._cmd("PING", 3000);
           if (!ok) return false;
           const doc = JSON.parse(rest);
           if (doc.version) this.targetDescription = `Playdate (${{doc.version}}) via Live USB Serial`;
+          hubLog("info", "serial", "PING succeeded", doc);
           return !!doc.ok;
-        }} catch {{
+        }} catch (e) {{
+          hubLog("error", "serial", "PING failed: " + (e.message || e));
           return false;
         }}
       }}
@@ -612,7 +802,7 @@ def main():
         const totalSize = st.size;
         const chunks = [];
         let offset = 0;
-        const step = 12288;
+        const step = 4096;
         while (offset < totalSize || (totalSize === 0 && offset === 0)) {{
           const {{ ok, rest, dataChunks }} = await this._cmd(`READ ${{offset}} ${{step}} ${{vpath}}`, 12000);
           if (!ok) throw new Error("Serial READ failed: " + rest);
@@ -643,11 +833,14 @@ def main():
         for (let i = 0; i < bytes.length; i += step) {{
           const slice = bytes.subarray(i, i + step);
           const b64 = uint8ToBase64(slice);
-          await this.mutex.then(async () => {{
-            await this.writer.write(enc.encode("msg !CP WDATA " + b64 + "\\n"));
-          }});
+          const sendChunk = async () => {{
+            await this.writer.write(enc.encode("msg !CP WDATA " + b64 + "\\r\\n"));
+          }};
+          const next = this.mutex.then(sendChunk, sendChunk);
+          this.mutex = next.then(() => undefined, () => undefined);
+          await next;
           sinceFlush += slice.length;
-          if (sinceFlush >= 3600) {{
+          if (sinceFlush >= 480) {{
             const fl = await this._cmd("WFLUSH", 8000);
             if (!fl.ok) throw new Error("Serial WFLUSH failed: " + fl.rest);
             sinceFlush = 0;
@@ -677,12 +870,14 @@ def main():
 
       async relayHttp(reqObj) {{
         const reqPath = "/.crosspoint/.serial-relay-req.json";
+        hubLog("info", "serial-relay", `Relaying ${{reqObj.method || "GET"}} ${{reqObj.url}} via Playdate Wi-Fi…`);
         await this.writeFile(reqPath, new TextEncoder().encode(JSON.stringify(reqObj)));
         const {{ ok, rest, dataChunks }} = await this._cmd("RELAY " + reqPath, 35000);
         if (!ok) throw new Error(rest || "Serial HTTP relay failed");
         const meta = JSON.parse(rest || "{{}}");
         const b64 = dataChunks.join("");
         const bodyBytes = b64 ? base64ToUint8(b64) : new Uint8Array(0);
+        hubLog("info", "serial-relay", `Relay completed: HTTP ${{meta.status}} (${{bodyBytes.length || meta.bytes || 0}} bytes)`);
         return {{
           status: Number(meta.status || 200),
           bytes: Number(meta.bytes || bodyBytes.length),
@@ -849,7 +1044,6 @@ def main():
     }}
 
     let activeBackend = null;
-    let useLocalPythonBackend = false;
 
     async function loadJsonFile(vpath, fallback = {{}}) {{
       try {{
@@ -857,7 +1051,9 @@ def main():
           const raw = await activeBackend.readFile(vpath);
           return JSON.parse(new TextDecoder().decode(raw));
         }}
-      }} catch {{}}
+      }} catch (e) {{
+        hubLog("warn", "fs", `Failed to parse JSON at ${{vpath}}: ${{e.message || e}}`);
+      }}
       return fallback;
     }}
 
@@ -909,6 +1105,7 @@ def main():
           out.push(item);
         }}
       }}
+      hubLog("info", "plugins", `Discovered ${{out.length}} web plugin(s)`, out.map(p => p.name));
       return out;
     }}
 
@@ -1008,6 +1205,7 @@ def main():
     }}
 
     async function performOutboundFetch(url, method, headersObj, bodyStr) {{
+      const doFetch = window.__outboundFetch || nativeFetch;
       const fetchOpts = {{
         method,
         headers: headersObj || {{}},
@@ -1018,7 +1216,7 @@ def main():
         fetchOpts.body = bodyStr;
       }}
       try {{
-        return await nativeFetch(url, fetchOpts);
+        return await doFetch(url, fetchOpts);
       }} catch (directErr) {{
         // Fallback 1: If connected to Playdate via Web Serial, relay the HTTP(S) request
         // directly through the Playdate's own Wi-Fi stack (`!CP RELAY`)!
@@ -1035,26 +1233,12 @@ def main():
               headers: {{ "Content-Type": "application/octet-stream" }}
             }});
           }} catch (serialRelayErr) {{
-            console.warn("Playdate WebSerial HTTP relay fallback failed:", serialRelayErr);
+            hubLog("warn", "relay", "Playdate WebSerial HTTP relay fallback failed: " + (serialRelayErr.message || serialRelayErr));
           }}
         }}
-        // Fallback 2: If local web_host.py is running on 127.0.0.1:8080, use its /api/relay
-        try {{
-          const relayRes = await nativeFetch("http://127.0.0.1:8080/api/relay", {{
-            method: "POST",
-            headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify({{ plugin: "hub", method, url, headers: headersObj || {{}}, body: bodyStr || "" }})
-          }});
-          if (relayRes.ok) {{
-            const upstreamStatus = Number(relayRes.headers.get("X-Relay-Status") || 200);
-            const rawHdrs = JSON.parse(relayRes.headers.get("X-Relay-Headers") || "[]");
-            const buf = await relayRes.arrayBuffer();
-            return new Response(buf, {{ status: upstreamStatus, headers: rawHdrs }});
-          }}
-        }} catch {{}}
-        // Fallback 3: Public CORS proxy for Data Disk mode when endpoint lacks CORS headers
+        // Fallback 2: Public CORS proxy for Data Disk mode when endpoint lacks CORS headers
         const proxyUrl = "https://corsproxy.io/?url=" + encodeURIComponent(url);
-        return await nativeFetch(proxyUrl, fetchOpts);
+        return await doFetch(proxyUrl, fetchOpts);
       }}
     }}
 
@@ -1142,6 +1326,7 @@ def main():
             }}
           }});
         }} catch (e) {{
+          hubLog("error", "relay", `/api/relay failed for ${{targetUrl}}: ${{e.message || e}}`);
           return jsonResponse(502, {{ error: "relay failed: " + e.message }});
         }}
       }}
@@ -1157,6 +1342,7 @@ def main():
           return jsonResponse(400, {{ error: "bad url/dest" }});
         }}
         try {{
+          const doFetch = window.__outboundFetch || nativeFetch;
           // If connected via Web Serial and direct browser fetch fails due to CORS,
           // let Playdate download directly to `dest` on its filesystem over Wi-Fi!
           let up;
@@ -1170,7 +1356,7 @@ def main():
             if (reqMethod !== "GET" && reqMethod !== "HEAD" && reqBody) {{
               fetchOpts.body = reqBody;
             }}
-            up = await nativeFetch(targetUrl, fetchOpts);
+            up = await doFetch(targetUrl, fetchOpts);
           }} catch (corsErr) {{
             if (activeBackend && typeof activeBackend.relayHttp === "function") {{
               const rel = await activeBackend.relayHttp({{
@@ -1197,6 +1383,7 @@ def main():
           await activeBackend.writeFile(dest, bytes);
           return jsonResponse(200, {{ status: up.status, bytes: bytes.length, total: bytes.length, complete: true }});
         }} catch (e) {{
+          hubLog("error", "fetchToSd", `/api/fetch failed for ${{targetUrl}} -> ${{dest}}: ${{e.message || e}}`);
           return jsonResponse(200, {{ status: -1, bytes: 0, complete: false, error: "transport failure: " + e.message }});
         }}
       }}
@@ -1454,20 +1641,25 @@ def main():
     }}
 
     // Intercept window.fetch for virtual CrossPoint endpoints
+    const VIRTUAL_EXACT_ROUTES = new Set(["/plugin", "/download", "/upload", "/mkdir", "/rename", "/move", "/delete"]);
     window.fetch = async function(input, init) {{
-      const rawUrl = typeof input === "string" ? input : (input && input.url) || "";
+      let rawUrl = "";
+      if (typeof input === "string") rawUrl = input;
+      else if (input instanceof URL) rawUrl = input.href;
+      else if (input && typeof input.url === "string") rawUrl = input.url;
+
       let isLocalRoute = false;
       let urlObj = null;
       try {{
         if (rawUrl.startsWith("/")) {{
           isLocalRoute = true;
           urlObj = new URL(rawUrl, "http://crosspoint.local");
-        }} else {{
+        }} else if (rawUrl) {{
           const parsed = new URL(rawUrl, window.location.href);
-          if (parsed.origin === window.location.origin && (
-              parsed.pathname.startsWith("/api/") ||
-              ["/plugin", "/download", "/upload", "/mkdir", "/rename", "/move", "/delete"].includes(parsed.pathname)
-          )) {{
+          const sameOriginOrFile =
+            parsed.origin === window.location.origin ||
+            (window.location.protocol === "file:" && parsed.protocol === "file:");
+          if (sameOriginOrFile && (parsed.pathname.startsWith("/api/") || VIRTUAL_EXACT_ROUTES.has(parsed.pathname))) {{
             isLocalRoute = true;
             urlObj = parsed;
           }}
@@ -1475,14 +1667,21 @@ def main():
       }} catch {{}}
 
       if (isLocalRoute && urlObj) {{
-        if (activeBackend) {{
-          const method = ((init && init.method) || (typeof input === "object" && input.method) || "GET").toUpperCase();
-          return await handleVirtualRequest(urlObj, method, init);
+        const method = ((init && init.method) || (typeof input === "object" && input && input.method) || "GET").toUpperCase();
+        if (!activeBackend) {{
+          hubLog("warn", "api", `${{method}} ${{urlObj.pathname}} called before Playdate was connected`);
+          return jsonResponse(503, {{ error: "Playdate not connected yet" }});
         }}
-        if (useLocalPythonBackend) {{
-          return await nativeFetch(input, init);
+        try {{
+          const t0 = performance.now();
+          const resp = await handleVirtualRequest(urlObj, method, init);
+          const ms = (performance.now() - t0).toFixed(0);
+          hubLog("debug", "api", `${{method}} ${{urlObj.pathname}}${{urlObj.search}} -> HTTP ${{resp.status}} (${{ms}}ms)`);
+          return resp;
+        }} catch (err) {{
+          hubLog("error", "api", `Exception in ${{method}} ${{urlObj.pathname}}: ${{err.message || err}}`, err);
+          return jsonResponse(500, {{ error: err.message || String(err) }});
         }}
-        return jsonResponse(503, {{ error: "Playdate not connected yet" }});
       }}
       return await nativeFetch(input, init);
     }};
@@ -1500,14 +1699,14 @@ def main():
     let allSettings = [];
 
     function isConnected() {{
-      return !!activeBackend || useLocalPythonBackend;
+      return !!activeBackend;
     }}
 
     async function connectWebSerial(anyPort = false) {{
       if (!("serial" in navigator)) {{
-        await showWebAlert(
-          "Web Serial API is not available in this browser. Please open this page in Google Chrome, Microsoft Edge, Brave, or Opera."
-        );
+        const msg = "Web Serial API is not available in this browser. Please open this page in Google Chrome, Microsoft Edge, Brave, or Opera.";
+        hubLog("error", "serial", msg);
+        await showWebAlert(msg);
         return;
       }}
       try {{
@@ -1518,21 +1717,29 @@ def main():
             anyPort ? {{}} : {{ filters: [{{ usbVendorId: 0x1331 }}] }}
           );
         }} catch (filterErr) {{
-          if (!anyPort) {{
+          if (filterErr && filterErr.name === "NotFoundError" && !anyPort) {{
+            hubLog("info", "serial", "No port selected with USB VID 0x1331 filter; retrying without filter…");
             port = await navigator.serial.requestPort();
           }} else {{
             throw filterErr;
           }}
         }}
+        if (activeBackend && typeof activeBackend.close === "function") {{
+          await activeBackend.close();
+        }}
         const backend = new WebSerialBackend(port);
         await backend.open();
         activeBackend = backend;
-        useLocalPythonBackend = false;
         setConnectionStatus("connected", backend.modeName, backend.targetDescription);
         showWebToast("Connected to Playdate via Live USB Serial!", false);
         await refreshActiveTab();
       }} catch (err) {{
-        console.error(err);
+        if (err && err.name === "NotFoundError") {{
+          hubLog("info", "serial", "Serial port selection cancelled by user");
+          setConnectionStatus("disconnected", "Not connected to Playdate", "Serial port selection cancelled");
+          return;
+        }}
+        hubLog("error", "serial", "Serial connection failed: " + (err.message || err), err);
         setConnectionStatus("disconnected", "Serial Connection Failed", err.message || String(err));
         showWebToast("Serial connection failed: " + (err.message || err), true);
       }}
@@ -1540,25 +1747,30 @@ def main():
 
     async function connectDirectoryPicker() {{
       if (!("showDirectoryPicker" in window)) {{
-        await showWebAlert(
-          "Directory Picker API is not available in this browser. Please use Google Chrome, Microsoft Edge, Brave, or Opera."
-        );
+        const msg = "Directory Picker API is not available in this browser. Please use Google Chrome, Microsoft Edge, Brave, or Opera.";
+        hubLog("error", "fs-picker", msg);
+        await showWebAlert(msg);
         return;
       }}
       try {{
         setConnectionStatus("busy", "Opening Playdate Data Folder…", "Select your PLAYDATE drive or Data folder");
         const picked = await window.showDirectoryPicker({{ mode: "readwrite" }});
         const {{ handle, label }} = await FileSystemAccessBackend.resolveCrossPointDataHandle(picked);
+        if (activeBackend && typeof activeBackend.close === "function") {{
+          await activeBackend.close();
+        }}
         activeBackend = new FileSystemAccessBackend(handle, label);
-        useLocalPythonBackend = false;
+        hubLog("info", "fs-picker", "Opened Playdate Data folder: " + label);
         setConnectionStatus("connected", "Playdate Data Folder", label);
         showWebToast("Opened Playdate Data folder: " + label, false);
         await refreshActiveTab();
       }} catch (err) {{
         if (err && err.name === "AbortError") {{
+          hubLog("info", "fs-picker", "Folder selection cancelled by user");
           setConnectionStatus("disconnected", "Not connected to Playdate", "Folder selection cancelled");
           return;
         }}
+        hubLog("error", "fs-picker", "Could not open folder: " + (err.message || err), err);
         setConnectionStatus("disconnected", "Folder Access Failed", err.message || String(err));
         showWebToast("Could not open folder: " + (err.message || err), true);
       }}
@@ -1576,7 +1788,16 @@ def main():
     }}
 
     async function refreshActiveTab() {{
-      if (!isConnected()) return;
+      if (!isConnected()) {{
+        hubLog("info", "ui", "Refresh requested before Playdate connection; prompting user to connect.");
+        const empty = document.getElementById("empty-state");
+        const emptyMsg = document.getElementById("empty-state-msg");
+        if (empty && emptyMsg) {{
+          emptyMsg.textContent = "Connect your Playdate above (via Live USB Serial or Playdate Data Folder) to load installed web plugins.";
+          empty.hidden = false;
+        }}
+        return;
+      }}
       if (currentTab === "plugins") await reloadPluginsTab();
       else if (currentTab === "files") await reloadFilesTab(currentFilesPath);
       else if (currentTab === "settings") await reloadSettingsTab();
@@ -1588,10 +1809,17 @@ def main():
       const empty = document.getElementById("empty-state");
       const emptyMsg = document.getElementById("empty-state-msg");
       host.replaceChildren();
+      if (!isConnected()) {{
+        emptyMsg.textContent = "Connect your Playdate above to load installed web plugins.";
+        empty.hidden = false;
+        return;
+      }}
       empty.hidden = true;
+      window.__lastPluginLoadError = "";
       const ok = await loadPlugins("settings");
       if (!ok) {{
-        emptyMsg.textContent = "Could not load plugins from Playdate. Click Refresh to try again.";
+        const detail = window.__lastPluginLoadError ? ` (${{window.__lastPluginLoadError}})` : "";
+        emptyMsg.textContent = `Could not load plugins from Playdate${{detail}}. Check the Diagnostics Console below or click Refresh to try again.`;
         empty.hidden = false;
       }} else if (host.children.length === 0) {{
         emptyMsg.innerHTML =
@@ -1678,6 +1906,7 @@ def main():
         table.appendChild(tbody);
         container.replaceChildren(table);
       }} catch (e) {{
+        hubLog("error", "files", "Error loading files: " + (e.message || e), e);
         container.innerHTML = `<p class="empty-state">Error loading files: ${{e.message || e}}</p>`;
       }}
     }}
@@ -1694,6 +1923,7 @@ def main():
         a.click();
         a.remove();
       }} catch (e) {{
+        hubLog("error", "files", "Download failed: " + (e.message || e), e);
         showWebToast("Download failed: " + (e.message || e), true);
       }}
     }}
@@ -1774,6 +2004,7 @@ def main():
         container.innerHTML = html;
         document.getElementById("save-container").style.display = "block";
       }} catch (e) {{
+        hubLog("error", "settings", "Failed to load settings: " + (e.message || e), e);
         container.innerHTML = `<div class="card"><p class="empty-state">Failed to load settings: ${{e.message || e}}</p></div>`;
       }}
     }}
@@ -1836,6 +2067,7 @@ def main():
           el.appendChild(row);
         }}
       }} catch (e) {{
+        hubLog("error", "fonts", "Failed to load fonts: " + (e.message || e), e);
         el.innerHTML = `<p class="empty-state">Failed to load fonts.</p>`;
       }}
     }}
@@ -1862,28 +2094,7 @@ def main():
       await reloadFontsTab();
     }}
 
-    // Auto-detect if served by local `web_host.py`
-    (async () => {{
-      if (window.location.protocol.startsWith("http")) {{
-        try {{
-          const res = await nativeFetch("/api/status");
-          if (res.ok) {{
-            const info = await res.json();
-            if (info && info.firmwareFamily === "crosspoint") {{
-              useLocalPythonBackend = true;
-              setConnectionStatus(
-                "connected",
-                info.storageMode || "Local Companion Server",
-                info.storageTarget || window.location.origin
-              );
-              await refreshActiveTab();
-              return;
-            }}
-          }}
-        }} catch {{}}
-      }}
-      document.getElementById("empty-state").hidden = false;
-    }})();
+    hubLog("info", "startup", `Web Hub initialized (origin=${{window.location.origin}}, protocol=${{window.location.protocol}}, serial=${{"serial" in navigator}}, dirPicker=${{"showDirectoryPicker" in window}})`);
   </script>
 </body>
 </html>
