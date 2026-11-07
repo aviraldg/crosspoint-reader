@@ -213,14 +213,14 @@ void BaseTheme::drawHintLabel(const GfxRenderer& renderer, const int fontId, con
 
 void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                 const char* btn4) const {
-  if (gpio.hasTouch()) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  if (gpio.hasTouch() || metrics.buttonHintsHeight <= 0) {
     return;
   }
 
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::DEFAULT_UI_ORIENTATION);
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageHeight = renderer.getScreenHeight();
   const int screenWidth = renderer.getScreenWidth();
   const int buttonWidth = screenWidth <= 400 ? 90 : 106;
@@ -252,7 +252,7 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
 }
 
 void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const {
-  if (gpio.hasTouch()) {
+  if (gpio.hasTouch() || HalDisplay::DISPLAY_HEIGHT <= 240) {
     return;
   }
 
@@ -343,8 +343,23 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   status.battery.charging = gpio.isUsbConnected();
   // Static label buffers: headers draw on the single render task, and the
   // strings only need to outlive the fui::header() call that consumes them.
-  static char percentText[8];
-  if (SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS) {
+  static char percentText[24];
+  static char clockText[10];
+  const bool showClock = metrics.headerShowsClock && SETTINGS.clockShowInHeader && halClock.isAvailable() &&
+                         halClock.formatTime(clockText, sizeof(clockText), SETTINGS.clockFormat == 1);
+  const bool showPercent = SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    if (showClock && showPercent) {
+      snprintf(percentText, sizeof(percentText), "%s  %u%%", clockText, static_cast<unsigned>(percentage));
+      status.battery.label = percentText;
+    } else if (showClock) {
+      snprintf(percentText, sizeof(percentText), "%s", clockText);
+      status.battery.label = percentText;
+    } else if (showPercent) {
+      snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
+      status.battery.label = percentText;
+    }
+  } else if (showPercent) {
     snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
     status.battery.label = percentText;
   }
@@ -372,19 +387,27 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   props.leadingSize = headerButtonSize;
   props.trailingSize = headerButtonSize;
   props.leadingStyles = freeink::ui::plainStyles(freeink::ui::Paint::solid(freeink::ui::Color::Black));
-  // Only the status row moves to the shared slot. The title and buttons keep
-  // the theme's own layout: they center below the theme's strip height, and
-  // the band-top shift is taken back out (in full for the top-relative
-  // buttons, half for the band-centered title).
-  const int16_t contentStrip = static_cast<int16_t>(metrics.batteryBarHeight);
-  const int shift = headerBandTopShift();
-  props.actionOffsetY =
-      static_cast<int16_t>(contentStrip + (bandHeight - contentStrip - headerButtonSize) / 2 - 4 + opticalDrop - shift);
-  // headerBand lowers only the band's top edge by headerOffsetY, which moves a
-  // centered title half as far as the buttons; the second half goes here.
-  props.titleOffsetY = static_cast<int16_t>(contentStrip / 2 + (BoardConfig::ACTIVE.headerOffsetY - shift) / 2);
-  status.stripHeight = strip;
-  status.clockCentered = false;
+  if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+    // On 240p panels, the 32px header band uses the single-row shared-line layout.
+    props.actionOffsetY = static_cast<int16_t>((bandHeight - headerButtonSize) / 2 - 4 + opticalDrop);
+    props.titleOffsetY = 0;
+    status.stripHeight = bandHeight;
+    status.clockCentered = false;
+  } else {
+    // Only the status row moves to the shared slot. The title and buttons keep
+    // the theme's own layout: they center below the theme's strip height, and
+    // the band-top shift is taken back out (in full for the top-relative
+    // buttons, half for the band-centered title).
+    const int16_t contentStrip = static_cast<int16_t>(metrics.batteryBarHeight);
+    const int shift = headerBandTopShift();
+    props.actionOffsetY =
+        static_cast<int16_t>(contentStrip + (bandHeight - contentStrip - headerButtonSize) / 2 - 4 + opticalDrop - shift);
+    // headerBand lowers only the band's top edge by headerOffsetY, which moves a
+    // centered title half as far as the buttons; the second half goes here.
+    props.titleOffsetY = static_cast<int16_t>(contentStrip / 2 + (BoardConfig::ACTIVE.headerOffsetY - shift) / 2);
+    status.stripHeight = strip;
+    status.clockCentered = false;
+  }
 
   // The user's setting alone controls the clock; themes cannot hide or center it.
   static char clockText[10];
