@@ -8,6 +8,9 @@
 
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+#include "components/themes/playdate/PlaydateThemes.h"
+#endif
 #if FREEINK_CAP_TOUCH
 #include "components/UiAppHelpers.h"
 #endif
@@ -187,6 +190,11 @@ void UiListActivity::loop() {
   }
 
   navigateButtons();
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+  if (PlaydateThemeAnim::shouldUpdateHud()) {
+    requestUpdate();
+  }
+#endif
 }
 
 void UiListActivity::navigateButtons() {

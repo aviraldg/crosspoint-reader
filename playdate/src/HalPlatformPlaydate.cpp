@@ -30,6 +30,17 @@ std::string gSerialLineBuffer;
 
 constexpr int64_t kPlaydateEpochToUnixOffset = 946684800LL;
 
+constexpr float kRefreshRateUncapped = 0.0f;
+constexpr float kRefreshRateInteractive = 30.0f;
+constexpr float kRefreshRateActiveReader = 15.0f;
+constexpr float kRefreshRateIdle = 8.0f;
+
+bool gSerialFastMode = false;
+bool gSkipLoopDelay = false;
+bool gForegroundReader = false;
+bool gPowerSavingEnabled = false;
+float gAppliedRefreshRate = -1.0f;
+
 }  // namespace
 
 namespace playdate_hal {
@@ -37,11 +48,45 @@ namespace playdate_hal {
 PlaydateAPI* pd() { return gPlaydateApi; }
 
 void setPlaydateAPI(PlaydateAPI* api) {
-  gPlaydateApi = api;
+  if (gPlaydateApi != api) {
+    gPlaydateApi = api;
+    gAppliedRefreshRate = -1.0f;
+  }
   BoardConfig::ACTIVE.name = "Panic Playdate";
   BoardConfig::ACTIVE.displayWidth = HalDisplay::DISPLAY_WIDTH;
   BoardConfig::ACTIVE.displayHeight = HalDisplay::DISPLAY_HEIGHT;
   BoardConfig::ACTIVE.viewableInsets = {0, 0, 0, 0};
+}
+
+void applyRefreshRate() {
+  if (!gPlaydateApi || !gPlaydateApi->display || !gPlaydateApi->display->setRefreshRate) {
+    return;
+  }
+  float targetRate = kRefreshRateInteractive;
+  if (gSerialFastMode || gSkipLoopDelay) {
+    targetRate = kRefreshRateUncapped;
+  } else if (gPowerSavingEnabled) {
+    targetRate = kRefreshRateIdle;
+  } else if (gForegroundReader) {
+    targetRate = kRefreshRateActiveReader;
+  }
+  if (targetRate != gAppliedRefreshRate) {
+    gPlaydateApi->display->setRefreshRate(targetRate);
+    gAppliedRefreshRate = targetRate;
+  }
+}
+
+void setSerialFastMode(bool enabled) {
+  if (gSerialFastMode != enabled) {
+    gSerialFastMode = enabled;
+    applyRefreshRate();
+  }
+}
+
+void setLoopRefreshHints(bool skipLoopDelay, bool foregroundReader) {
+  gSkipLoopDelay = skipLoopDelay;
+  gForegroundReader = foregroundReader;
+  applyRefreshRate();
 }
 
 }  // namespace playdate_hal
@@ -170,11 +215,21 @@ HalPowerManager powerManager;
 void HalPowerManager::begin() {
   normalFreq = 168;
   isLowPower = false;
+  currentLockMode = None;
+  gPowerSavingEnabled = false;
   _batteryCachedPercent = static_cast<int>(getBatteryPercentage());
   _batteryLastPollMs = millis();
+  playdate_hal::applyRefreshRate();
 }
 
-void HalPowerManager::setPowerSaving(bool enabled) { isLowPower = enabled; }
+void HalPowerManager::setPowerSaving(bool enabled) {
+  const bool targetLowPower = (currentLockMode == None) && enabled;
+  if (isLowPower != targetLowPower || gPowerSavingEnabled != targetLowPower) {
+    isLowPower = targetLowPower;
+    gPowerSavingEnabled = targetLowPower;
+    playdate_hal::applyRefreshRate();
+  }
+}
 
 void HalPowerManager::startDeepSleep(HalGPIO& gpioRef, bool wakeOnHeldButton) const {
   (void)gpioRef;
@@ -192,9 +247,21 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
   return 100;
 }
 
-HalPowerManager::Lock::Lock() { valid = true; }
+HalPowerManager::Lock::Lock() {
+  if (powerManager.currentLockMode == None) {
+    powerManager.currentLockMode = NormalSpeed;
+    valid = true;
+    powerManager.setPowerSaving(false);
+  } else {
+    valid = false;
+  }
+}
 
-HalPowerManager::Lock::~Lock() = default;
+HalPowerManager::Lock::~Lock() {
+  if (valid) {
+    powerManager.currentLockMode = None;
+  }
+}
 
 HalClock halClock;
 

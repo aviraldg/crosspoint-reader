@@ -23,6 +23,7 @@ float gCrankAccumulatorDeg = 0.0f;
 int gPendingCrankSteps = 0;
 uint8_t gCrankPulseButton = HalGPIO::BTN_DOWN;
 uint8_t gCrankPulseFramesRemaining = 0;
+bool gCrankPulseActiveThisFrame = false;
 
 uint8_t mapPlaydateButtons(PDButtons buttons) {
   uint8_t mask = 0;
@@ -36,6 +37,10 @@ uint8_t mapPlaydateButtons(PDButtons buttons) {
 }
 
 }  // namespace
+
+namespace playdate_hal {
+bool isCrankPulseActive() { return gCrankPulseActiveThisFrame; }
+}  // namespace playdate_hal
 
 bool HalGPIO::isXteinkDevice() const { return false; }
 
@@ -52,6 +57,7 @@ void HalGPIO::begin() {
   gCrankAccumulatorDeg = 0.0f;
   gPendingCrankSteps = 0;
   gCrankPulseFramesRemaining = 0;
+  gCrankPulseActiveThisFrame = false;
 }
 
 void HalGPIO::prepareForDeepSleep() {}
@@ -59,8 +65,9 @@ void HalGPIO::prepareForDeepSleep() {}
 void HalGPIO::update() {
   PlaydateAPI* pd = playdate_hal::pd();
   PDButtons current = static_cast<PDButtons>(0);
+  PDButtons pushed = static_cast<PDButtons>(0);
   if (pd && pd->system) {
-    pd->system->getButtonState(&current, nullptr, nullptr);
+    pd->system->getButtonState(&current, &pushed, nullptr);
     if (!pd->system->isCrankDocked()) {
       gCrankAccumulatorDeg += pd->system->getCrankChange();
       while (gCrankAccumulatorDeg >= kCrankDetentDegrees) {
@@ -76,7 +83,11 @@ void HalGPIO::update() {
     }
   }
 
-  uint8_t nextState = mapPlaydateButtons(current);
+  // Include newly pushed edges that weren't already held in gCurrState so a quick tap
+  // between two low-FPS idle frames is never dropped; its release lands on the next frame.
+  uint8_t nextState =
+      static_cast<uint8_t>(mapPlaydateButtons(current) | (mapPlaydateButtons(pushed) & ~gCurrState));
+  gCrankPulseActiveThisFrame = false;
 
   if (gCrankPulseFramesRemaining > 0) {
     gCrankPulseFramesRemaining--;
@@ -90,6 +101,7 @@ void HalGPIO::update() {
     }
     nextState |= (1U << gCrankPulseButton);
     gCrankPulseFramesRemaining = 1;
+    gCrankPulseActiveThisFrame = true;
   }
 
   gPrevState = gCurrState;
