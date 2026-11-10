@@ -1,0 +1,94 @@
+name: Playdate dev build
+
+on:
+  push:
+    branches: [feat/playdate-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playdate-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLAYDATE_SDK_VERSION: '3.1.2'
+  RELEASE_TAG: playdate-dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Cache Playdate SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/PlaydateSDK
+          key: playdate-sdk-linux-${{ env.PLAYDATE_SDK_VERSION }}
+
+      - name: Download Playdate SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o sdk.tar.gz \
+            "https://download.panic.com/playdate_sdk/Linux/PlaydateSDK-${PLAYDATE_SDK_VERSION}.tar.gz"
+          mkdir -p ~/PlaydateSDK
+          tar -xzf sdk.tar.gz -C ~/PlaydateSDK --strip-components=1
+          rm sdk.tar.gz
+
+      - name: Build CrossPoint.pdx
+        run: |
+          export PLAYDATE_SDK_PATH="$HOME/PlaydateSDK"
+          ./playdate/build_playdate.sh
+
+      - name: Package
+        id: meta
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          cd playdate
+          zip -qr "../CrossPoint-playdate-${SHORT_SHA}.pdx.zip" CrossPoint.pdx
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: CrossPoint-playdate-${{ steps.meta.outputs.short_sha }}
+          path: CrossPoint-playdate-${{ steps.meta.outputs.short_sha }}.pdx.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: CrossPoint-playdate-${{ needs.build.outputs.short_sha }}
+
+      - name: Publish rolling dev release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+        run: |
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes || true
+          gh release create "$RELEASE_TAG" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Playdate dev build (${SHORT_SHA})" \
+            --notes "Development build of ${GITHUB_REF_NAME} at ${GITHUB_SHA}. Not for general use." \
+            "CrossPoint-playdate-${SHORT_SHA}.pdx.zip"
