@@ -24,6 +24,9 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+#include "components/themes/playdate/PlaydateThemes.h"
+#endif
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
@@ -339,15 +342,78 @@ void HomeActivity::loop() {
   // Cover grid home splits navigation by button group (see below); the flat
   // next/previous cycle is for the classic list home only.
   if (!coverGridUi) {
-    buttonNavigator.onNext([this, menuCount] {
-      selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
-      requestUpdate();
-    });
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+    if (SETTINGS.uiTheme == CrossPointSettings::UI_THEME::PLAYFUL) {
+      const int bookOffset = static_cast<int>(recentBooks.size());
+      const int tileCount = std::max(0, menuCount - bookOffset);
 
-    buttonNavigator.onPrevious([this, menuCount] {
-      selectorIndex = ButtonNavigator::previousIndex(selectorIndex, menuCount);
-      requestUpdate();
-    });
+      // D-Pad navigates the tall left book card + right 2x2 tile grid naturally;
+      // Crank detents (which synthesize BTN_DOWN / BTN_UP with isCrankPulseActive())
+      // cycle sequentially through all items.
+      buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [this, bookOffset, tileCount] {
+        if (bookOffset > 0 && selectorIndex < bookOffset) {
+          if (tileCount > 0) selectorIndex = bookOffset;
+        } else {
+          const int t = selectorIndex - bookOffset;
+          if ((t % 2) == 0 && (t + 1) < tileCount) {
+            selectorIndex = bookOffset + t + 1;
+          }
+        }
+        requestUpdate();
+      });
+      buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this, bookOffset] {
+        if (selectorIndex >= bookOffset) {
+          const int t = selectorIndex - bookOffset;
+          if ((t % 2) == 1) {
+            selectorIndex = bookOffset + t - 1;
+          } else if (bookOffset > 0) {
+            selectorIndex = 0;
+          }
+        }
+        requestUpdate();
+      });
+      buttonNavigator.onPressAndContinuous(
+          {MappedInputManager::Button::Down}, [this, menuCount, bookOffset, tileCount] {
+            if (PlaydateThemeAnim::isCrankPulseActive()) {
+              selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
+            } else if (bookOffset > 0 && selectorIndex < bookOffset) {
+              if (tileCount > 0) selectorIndex = bookOffset;
+            } else {
+              const int t = selectorIndex - bookOffset;
+              if (t + 2 < tileCount) {
+                selectorIndex = bookOffset + t + 2;
+              } else if (t + 1 < tileCount) {
+                selectorIndex = bookOffset + t + 1;
+              }
+            }
+            requestUpdate();
+          });
+      buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [this, menuCount, bookOffset] {
+        if (PlaydateThemeAnim::isCrankPulseActive()) {
+          selectorIndex = ButtonNavigator::previousIndex(selectorIndex, menuCount);
+        } else if (selectorIndex >= bookOffset) {
+          const int t = selectorIndex - bookOffset;
+          if (t >= 2) {
+            selectorIndex = bookOffset + t - 2;
+          } else if (bookOffset > 0) {
+            selectorIndex = 0;
+          }
+        }
+        requestUpdate();
+      });
+    } else
+#endif
+    {
+      buttonNavigator.onNext([this, menuCount] {
+        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
+        requestUpdate();
+      });
+
+      buttonNavigator.onPrevious([this, menuCount] {
+        selectorIndex = ButtonNavigator::previousIndex(selectorIndex, menuCount);
+        requestUpdate();
+      });
+    }
   }
 
   const auto swipe = mappedInput.wasSwipe();
@@ -464,7 +530,14 @@ void HomeActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     activateSelection();
+    return;
   }
+
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+  if (firstRenderDone && recentsLoaded && !recentsLoading && PlaydateThemeAnim::shouldUpdateHome()) {
+    requestUpdate();
+  }
+#endif
 }
 
 void HomeActivity::render(RenderLock&&) {

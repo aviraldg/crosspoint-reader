@@ -14,4 +14,14 @@ void setPlaydateAPI(PlaydateAPI* api);
 // wait on cooperative Playdate OS callbacks, dialogs, or network I/O.
 void pumpMainLoop();
 
+// True when the current frame's BTN_UP or BTN_DOWN edge was synthesized from a
+// Playdate crank detent rather than the physical D-Pad.
+bool isCrankPulseActive();
+
+// Coordinates Playdate display->setRefreshRate() with CrossPoint's HalPowerManager,
+// Activity::skipLoopDelay(), foreground reader state, and serial bridge transfers.
+void setSerialFastMode(bool enabled);
+void setLoopRefreshHints(bool skipLoopDelay, bool foregroundReader);
+void applyRefreshRate();
+
 }  // namespace playdate_hal

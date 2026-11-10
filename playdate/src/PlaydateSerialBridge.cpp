@@ -21,6 +21,7 @@
 #include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
 #include "activities/ActivityManager.h"
+#include "components/UITheme.h"
 #include "util/BookCacheUtils.h"
 #include "util/PluginEvents.h"
 
@@ -48,22 +49,16 @@ constexpr size_t kWriteBufferFlushThreshold = 16 * 1024;
 void enterSerialFastMode() {
   gLastSerialActivityMs = millis();
   if (!gSerialFastMode) {
-    PlaydateAPI* pd = playdate_hal::pd();
-    if (pd && pd->display && pd->display->setRefreshRate) {
-      pd->display->setRefreshRate(0.0f);
-      gSerialFastMode = true;
-    }
+    gSerialFastMode = true;
+    playdate_hal::setSerialFastMode(true);
   }
 }
 
 void maybeExitSerialFastMode() {
   if (!gSerialFastMode || gWriteOpen || gPendingRelay) return;
   if (millis() - gLastSerialActivityMs <= 3000) return;
-  PlaydateAPI* pd = playdate_hal::pd();
-  if (pd && pd->display && pd->display->setRefreshRate) {
-    pd->display->setRefreshRate(30.0f);
-  }
   gSerialFastMode = false;
+  playdate_hal::setSerialFastMode(false);
 }
 
 void sendLine(const char* kind, const std::string& json) {
@@ -117,8 +112,13 @@ void reloadAfterWrite(const std::string& path) {
     SETTINGS.loadFromFile();
     SETTINGS.frontButtonFollowOrientation = 0;
     SETTINGS.sideButtonFollowOrientation = 0;
+    UITheme::getInstance().reload();
     display.setInverted(SETTINGS.screenInverted != 0);
-    activityManager.requestUpdate();
+    if (activityManager.isForegroundHomeShown()) {
+      activityManager.goHome();
+    } else {
+      activityManager.requestUpdate();
+    }
   } else if (path == "/.crosspoint/koreader.json") {
     KOREADER_STORE.loadFromFile();
   } else if (path == "/.crosspoint/opds.json") {

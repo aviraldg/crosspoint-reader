@@ -321,6 +321,29 @@ void seedSampleBooksIfNeeded() {
   }
 }
 
+unsigned long gLastActivityTimeMs = 0;
+
+void stepCrossPointFrame() {
+  playdate_serial::pumpSerialBridge();
+  mappedInputManager.update();
+
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.rawInputActive() ||
+      activityManager.preventAutoSleep()) {
+    gLastActivityTimeMs = millis();
+    powerManager.setPowerSaving(false);
+  }
+
+  activityManager.loop();
+
+  const bool skipLoopDelay = activityManager.skipLoopDelay();
+  if (skipLoopDelay) {
+    powerManager.setPowerSaving(false);
+  } else if (millis() - gLastActivityTimeMs >= HalPowerManager::IDLE_POWER_SAVING_MS) {
+    powerManager.setPowerSaving(true);
+  }
+  playdate_hal::setLoopRefreshHints(skipLoopDelay, activityManager.isForegroundReader());
+}
+
 #if defined(TARGET_SIMULATOR)
 constexpr size_t kSimulatorFiberStackSize = 512 * 1024;
 ucontext_t gHostCtx{};
@@ -333,9 +356,7 @@ bool gYielded = false;
 void simulatorFiberEntry() {
   for (;;) {
     gYielded = false;
-    playdate_serial::pumpSerialBridge();
-    mappedInputManager.update();
-    activityManager.loop();
+    stepCrossPointFrame();
     gInFiber = false;
     swapcontext(&gFiberCtx, &gHostCtx);
   }
@@ -373,9 +394,7 @@ __attribute__((naked)) void armSwapContext(ArmFiberContext* from, const ArmFiber
 void deviceFiberEntry() {
   for (;;) {
     gYielded = false;
-    playdate_serial::pumpSerialBridge();
-    mappedInputManager.update();
-    activityManager.loop();
+    stepCrossPointFrame();
     gInFiber = false;
     armSwapContext(&gFiberCtx, &gHostCtx);
   }
@@ -396,6 +415,8 @@ void onMenuReaderMenu(void* userdata) {
   if (gYielded) {
     return;
   }
+  gLastActivityTimeMs = millis();
+  powerManager.setPowerSaving(false);
   if (!activityManager.remoteShortcut(/*readerMenu=*/true)) {
     mappedInputManager.injectRemoteClick(RemoteButton::Confirm);
   }
@@ -404,6 +425,8 @@ void onMenuReaderMenu(void* userdata) {
 
 void onMenuGoHome(void* userdata) {
   (void)userdata;
+  gLastActivityTimeMs = millis();
+  powerManager.setPowerSaving(false);
   if (gYielded) {
     mappedInputManager.injectRemoteClick(RemoteButton::Back);
     return;
@@ -414,6 +437,8 @@ void onMenuGoHome(void* userdata) {
 
 void onMenuDarkMode(void* userdata) {
   (void)userdata;
+  gLastActivityTimeMs = millis();
+  powerManager.setPowerSaving(false);
   SETTINGS.screenInverted = (SETTINGS.screenInverted == 0) ? 1 : 0;
   SETTINGS.saveToFile();
   display.setInverted(SETTINGS.screenInverted != 0);
@@ -446,8 +471,7 @@ int updateCallback(void* userdata) {
     swapcontext(&gHostCtx, &gFiberCtx);
     gInFiber = false;
   } else {
-    mappedInputManager.update();
-    activityManager.loop();
+    stepCrossPointFrame();
   }
 #elif defined(TARGET_PLAYDATE)
   if (!gFiberInitialized && gFiberStack != nullptr) {
@@ -459,12 +483,10 @@ int updateCallback(void* userdata) {
     armSwapContext(&gHostCtx, &gFiberCtx);
     gInFiber = false;
   } else {
-    mappedInputManager.update();
-    activityManager.loop();
+    stepCrossPointFrame();
   }
 #else
-  mappedInputManager.update();
-  activityManager.loop();
+  stepCrossPointFrame();
 #endif
   return 1;
 }
@@ -520,12 +542,14 @@ void initCrossPointOnPlaydate(PlaydateAPI* pd) {
   playdate_serial::registerSerialBridge(pd);
 
   activityManager.begin();
+  gLastActivityTimeMs = millis();
   if (!APP_STATE.openEpubPath.empty() && Storage.exists(APP_STATE.openEpubPath.c_str())) {
     activityManager.goToReader(APP_STATE.openEpubPath);
   } else {
     activityManager.goHome();
   }
   activityManager.loop();
+  playdate_hal::setLoopRefreshHints(activityManager.skipLoopDelay(), activityManager.isForegroundReader());
 }
 
 }  // namespace
@@ -568,6 +592,10 @@ void pumpMainLoop() {
   }
 #endif
   mappedInputManager.update();
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.rawInputActive()) {
+    gLastActivityTimeMs = millis();
+    powerManager.setPowerSaving(false);
+  }
 }
 
 }  // namespace playdate_hal
@@ -692,11 +720,13 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
 #if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
       initPlaydateCppRuntimeOnce();
 #endif
-      if (playdate->display) {
-        playdate->display->setRefreshRate(30.0f);
-      }
       initCrossPointOnPlaydate(playdate);
       playdate->system->setUpdateCallback(updateCallback, nullptr);
+      break;
+    case kEventResume:
+    case kEventUnlock:
+      gLastActivityTimeMs = millis();
+      powerManager.setPowerSaving(false);
       break;
     case kEventPause:
     case kEventLowPower:

@@ -17,6 +17,9 @@
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+#include "components/themes/playdate/PlaydateThemes.h"
+#endif
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
 
 UITheme UITheme::instance;
@@ -71,6 +74,18 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       currentTheme = std::make_unique<Lyra3CoversTheme>();
       currentMetrics = &Lyra3CoversMetrics::values;
       break;
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+    case CrossPointSettings::UI_THEME::CROSSPLAY:
+      LOG_DBG("UI", "Using Crossplay theme");
+      currentTheme = std::make_unique<CrossplayTheme>();
+      currentMetrics = &CrossplayMetrics::values;
+      break;
+    case CrossPointSettings::UI_THEME::PLAYFUL:
+      LOG_DBG("UI", "Using Playful theme");
+      currentTheme = std::make_unique<PlayfulTheme>();
+      currentMetrics = &PlayfulMetrics::values;
+      break;
+#endif
   }
   metricsValid = false;
 }
@@ -81,7 +96,13 @@ const ThemeMetrics& UITheme::getMetrics() const {
   const bool touch = gpio.hasTouch();
   if (!metricsValid || touch != metricsForTouch) {
     adjustedMetrics = *currentMetrics;
-    if (HalDisplay::DISPLAY_HEIGHT <= 240) {
+#if defined(CROSSPOINT_PLAYDATE) && CROSSPOINT_PLAYDATE
+    const bool isPlaydateTheme =
+        currentMetrics == &CrossplayMetrics::values || currentMetrics == &PlayfulMetrics::values;
+#else
+    constexpr bool isPlaydateTheme = false;
+#endif
+    if (HalDisplay::DISPLAY_HEIGHT <= 240 && !isPlaydateTheme) {
       adjustedMetrics.topPadding = std::min(adjustedMetrics.topPadding, 2);
       adjustedMetrics.batteryBarHeight = std::min(adjustedMetrics.batteryBarHeight, 16);
       adjustedMetrics.headerHeight = std::min(adjustedMetrics.headerHeight, 32);

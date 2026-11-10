@@ -200,10 +200,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Plugin System did not exist in older settings files. Preserve the behavior
   // of users who already have SD plugins installed, while keeping the new
   // default disabled on clean installs.
+#if !defined(CROSSPOINT_PLAYDATE) || !CROSSPOINT_PLAYDATE
   if (doc["pluginsEnabled"].isNull()) {
     pluginsEnabled = PluginLocations::anyPluginInstalledOnDisk() ? 1 : 0;
     needsResave = true;
   }
+#endif
 
   const auto indentSpaces = doc["paragraphIndentSpaces"];
   const bool hasSavedWidth = indentSpaces.is<int>();
