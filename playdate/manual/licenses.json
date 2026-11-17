@@ -1,0 +1,56 @@
+{
+  "_comment": "Notices bundled into the Playdate manual. Paths are relative to the repository root. Each group becomes one chapter. Add an entry when the Playdate build gains a third-party component or asset. Keep shared entries in sync with scripts/build_release_license.py, which collects the ESP32 release notices.",
+  "groups": [
+    {
+      "title": "CrossPoint Reader",
+      "files": ["LICENSE"]
+    },
+    {
+      "title": "FreeInk SDK",
+      "files": ["freeink-sdk/LICENSE", "freeink-sdk/NOTICE"]
+    },
+    {
+      "title": "Downloaded libraries",
+      "fetchcontent": "playdate/CMakeLists.txt"
+    },
+    {
+      "title": "FreeType",
+      "credit": "This software is based in part on the work of the FreeType Team.",
+      "files": [
+        "freeink-sdk/libs/font/FreeInkFont/third_party/freetype/LICENSE.TXT",
+        "freeink-sdk/libs/font/FreeInkFont/third_party/freetype/FTL.TXT"
+      ]
+    },
+    {
+      "title": "Bundled source notices",
+      "source_notices": [
+        "lib/expat/*.[ch]",
+        "lib/miniz/third_party/*.[ch]",
+        "lib/uzlib/src/*.[ch]",
+        "freeink-sdk/libs/font/FreeInkFont/third_party/stb/stb_truetype.h",
+        "freeink-sdk/libs/font/FreeInkFont/third_party/freetype/src/base/fthash.c",
+        "freeink-sdk/libs/font/FreeInkFont/third_party/freetype/include/freetype/internal/fthash.h"
+      ]
+    },
+    {
+      "title": "Icons",
+      "files": ["freeink-sdk/libs/assets/Icons/lucide/LICENSE"]
+    },
+    {
+      "title": "Fonts",
+      "files": ["licenses/fonts.txt"]
+    },
+    {
+      "title": "Hyphenation patterns",
+      "files": ["licenses/hyphenation.txt", "licenses/LPPL-1.3c.txt"]
+    },
+    {
+      "title": "Copied code and data",
+      "files": ["licenses/borrowed-code.txt", "licenses/LGPL-3.0.txt", "licenses/GPL-3.0.txt"]
+    },
+    {
+      "title": "Apache License 2.0",
+      "files": ["licenses/Apache-2.0.txt"]
+    }
+  ]
+}

@@ -39,5 +39,6 @@ flake.*
 build_tests/
 playdate/build*/
 playdate/Source/pdex.*
+playdate/Source/manual/
 playdate/*.pdx/
 playdate/SimulatorDisk/

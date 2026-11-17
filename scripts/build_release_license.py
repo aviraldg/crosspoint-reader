@@ -111,6 +111,7 @@ def build_license(environment: str, repository: str, packages_dir: Path) -> str:
         "See licenses/README.md for the remaining license questions.",
     )
 
+    # playdate/manual/licenses.json lists the same SDK and vendored notices for Playdate.
     sdk = PROJECT_DIR / "freeink-sdk"
     for filename in (
         "LICENSE", "NOTICE", "libs/assets/Icons/lucide/LICENSE",
