@@ -80,10 +80,14 @@ int animationTick() {
 
 // 1-bit Bayer / halftone helper
 void fillHalftoneRect(const GfxRenderer& renderer, int x, int y, int w, int h, int density, bool blackDots = true) {
-  const int xEnd = x + w;
-  const int yEnd = y + h;
-  for (int py = y; py < yEnd; ++py) {
-    for (int px = x; px < xEnd; ++px) {
+  const int screenW = renderer.getScreenWidth();
+  const int screenH = renderer.getScreenHeight();
+  const int xStart = std::max(0, x);
+  const int yStart = std::max(0, y);
+  const int xEnd = std::min(screenW, x + w);
+  const int yEnd = std::min(screenH, y + h);
+  for (int py = yStart; py < yEnd; ++py) {
+    for (int px = xStart; px < xEnd; ++px) {
       bool dot = false;
       if (density == 1) {
         // 25% sparse halftone
@@ -103,7 +107,12 @@ void fillHalftoneRect(const GfxRenderer& renderer, int x, int y, int w, int h, i
 }
 
 void drawCheckerHLine(const GfxRenderer& renderer, int x0, int x1, int y, bool state = true) {
-  for (int x = x0; x <= x1; ++x) {
+  const int screenW = renderer.getScreenWidth();
+  const int screenH = renderer.getScreenHeight();
+  if (y < 0 || y >= screenH) return;
+  const int xs = std::max(0, x0);
+  const int xe = std::min(screenW - 1, x1);
+  for (int x = xs; x <= xe; ++x) {
     if (((x + y) & 1) == 0) {
       renderer.drawPixel(x, y, state);
     }
@@ -111,9 +120,15 @@ void drawCheckerHLine(const GfxRenderer& renderer, int x0, int x1, int y, bool s
 }
 
 void fillCircle(const GfxRenderer& renderer, int cx, int cy, int r, bool state = true) {
+  const int screenW = renderer.getScreenWidth();
+  const int screenH = renderer.getScreenHeight();
   const int r2 = r * r;
-  for (int dy = -r; dy <= r; ++dy) {
-    for (int dx = -r; dx <= r; ++dx) {
+  const int dyMin = std::max(-r, -cy);
+  const int dyMax = std::min(r, screenH - 1 - cy);
+  const int dxMin = std::max(-r, -cx);
+  const int dxMax = std::min(r, screenW - 1 - cx);
+  for (int dy = dyMin; dy <= dyMax; ++dy) {
+    for (int dx = dxMin; dx <= dxMax; ++dx) {
       if (dx * dx + dy * dy <= r2) {
         renderer.drawPixel(cx + dx, cy + dy, state);
       }
@@ -436,18 +451,21 @@ void drawBookCardCaptionAndProgress(const GfxRenderer& renderer, int cardX, int 
     const int lineStep = 13;
     int curY = textTopY;
     for (int i = 0; i < g_cachedCoverSlot.captionLineCount; ++i) {
-      const int w = renderer.getTextWidth(SMALL_FONT_ID, g_cachedCoverSlot.captionLines[i].c_str(), EpdFontFamily::BOLD);
+      const int w =
+          renderer.getTextWidth(SMALL_FONT_ID, g_cachedCoverSlot.captionLines[i].c_str(), EpdFontFamily::BOLD);
       renderer.drawText(SMALL_FONT_ID, cardX + (cardW - w) / 2, curY, g_cachedCoverSlot.captionLines[i].c_str(), ink,
                         EpdFontFamily::BOLD);
       curY += lineStep;
     }
     if (g_cachedCoverSlot.captionLineCount == 1 && !g_cachedCoverSlot.captionAuthor.empty()) {
-      const int aw = renderer.getTextWidth(SMALL_FONT_ID, g_cachedCoverSlot.captionAuthor.c_str(), EpdFontFamily::REGULAR);
+      const int aw =
+          renderer.getTextWidth(SMALL_FONT_ID, g_cachedCoverSlot.captionAuthor.c_str(), EpdFontFamily::REGULAR);
       renderer.drawText(SMALL_FONT_ID, cardX + (cardW - aw) / 2, curY, g_cachedCoverSlot.captionAuthor.c_str(), ink,
                         EpdFontFamily::REGULAR);
     }
   } else {
-    const std::string noBook = renderer.truncatedText(SMALL_FONT_ID, tr(STR_NO_OPEN_BOOK), maxTextW, EpdFontFamily::BOLD);
+    const std::string noBook =
+        renderer.truncatedText(SMALL_FONT_ID, tr(STR_NO_OPEN_BOOK), maxTextW, EpdFontFamily::BOLD);
     const int w1 = renderer.getTextWidth(SMALL_FONT_ID, noBook.c_str(), EpdFontFamily::BOLD);
     renderer.drawText(SMALL_FONT_ID, cardX + (cardW - w1) / 2, textTopY, noBook.c_str(), ink, EpdFontFamily::BOLD);
 
@@ -958,8 +976,9 @@ void PlayfulTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const s
   // Top mini-pill badge inside the tall card
   renderer.fillRoundedRect(cardX + 8, cardY + 5, cardW - 16, 15, 4, bookSelected ? Color::White : Color::Black);
   const char* fullContinue = tr(STR_CONTINUE_READING);
-  const char* rawBadge =
-      renderer.getTextWidth(SMALL_FONT_ID, fullContinue, EpdFontFamily::BOLD) <= (cardW - 22) ? fullContinue : tr(STR_RESUME);
+  const char* rawBadge = renderer.getTextWidth(SMALL_FONT_ID, fullContinue, EpdFontFamily::BOLD) <= (cardW - 22)
+                             ? fullContinue
+                             : tr(STR_RESUME);
   const std::string badgeText = renderer.truncatedText(SMALL_FONT_ID, rawBadge, cardW - 22, EpdFontFamily::BOLD);
   const int badgeW = renderer.getTextWidth(SMALL_FONT_ID, badgeText.c_str(), EpdFontFamily::BOLD);
   const int badgeH = renderer.getLineHeight(SMALL_FONT_ID);
@@ -1002,8 +1021,7 @@ void PlayfulTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCo
   }
 
   const int tick = animationTick();
-  const int selectedTick =
-      (tick > 0) ? (static_cast<int>((now - g_playfulSelectStartMs) / 33UL) + 1) : 0;
+  const int selectedTick = (tick > 0) ? (static_cast<int>((now - g_playfulSelectStartMs) / 33UL) + 1) : 0;
   const int textH = renderer.getLineHeight(SMALL_FONT_ID);
   const int count = std::min(buttonCount, 4);
 

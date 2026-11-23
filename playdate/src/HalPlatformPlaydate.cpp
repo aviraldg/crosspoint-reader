@@ -15,18 +15,29 @@
 #include <TrustedTime.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <string>
+
+#if defined(TARGET_SIMULATOR) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include "../../src/SilentRestart.h"
 
 namespace {
 
 PlaydateAPI* gPlaydateApi = nullptr;
-std::string gSerialLineBuffer;
+constexpr size_t kSerialLineBufCap = 512;
+char gSerialLineBuf[kSerialLineBufCap];
+size_t gSerialLineLen = 0;
+
+// Matches HEAP_SIZE in PlaydateSDK/C_API/buildsupport/playdate.cmake.
+constexpr size_t kPlaydateHeapBudgetBytes = 8388208U;
 
 constexpr int64_t kPlaydateEpochToUnixOffset = 946684800LL;
 
@@ -41,7 +52,159 @@ bool gForegroundReader = false;
 bool gPowerSavingEnabled = false;
 float gAppliedRefreshRate = -1.0f;
 
+#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+// 8-byte header preserves ARM Cortex-M7 AAPCS 8-byte alignment for double/int64/VFP.
+struct alignas(8) HeapBlockHeader {
+  uint32_t magic;
+  uint32_t size;
+};
+static_assert(sizeof(HeapBlockHeader) == 8, "HeapBlockHeader must stay 8 bytes for AAPCS alignment");
+
+constexpr uint32_t kHeapBlockMagic = 0xC055A110U;
+constexpr uint32_t kHeapFreedMagic = 0xDEADFA11U;
+
+size_t gHeapLiveBytes = 0;
+size_t gHeapPeakBytes = 0;
+uint32_t gHeapLiveBlocks = 0;
+uint32_t gHeapTotalAllocs = 0;
+uint32_t gHeapFailedAllocs = 0;
+uint32_t gHeapBadFrees = 0;
+
+void logHeapFault(const char* kind, unsigned requestedOrAddr) {
+  if (gPlaydateApi && gPlaydateApi->system && gPlaydateApi->system->logToConsole) {
+    gPlaydateApi->system->logToConsole("[MEM] %s arg=%u live=%u peak=%u blocks=%u fails=%u", kind, requestedOrAddr,
+                                       static_cast<unsigned>(gHeapLiveBytes), static_cast<unsigned>(gHeapPeakBytes),
+                                       static_cast<unsigned>(gHeapLiveBlocks),
+                                       static_cast<unsigned>(gHeapFailedAllocs));
+  }
+}
+#else
+size_t gSimBaselineBytes = 0;
+size_t gSimPeakBytes = 0;
+
+size_t readSimulatorRawAllocatedBytes() {
+#if defined(TARGET_SIMULATOR) && defined(__GLIBC__)
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
+  const struct mallinfo2 mi = mallinfo2();
+  return static_cast<size_t>(mi.uordblks);
+#else
+  const struct mallinfo mi = mallinfo();
+  return static_cast<size_t>(static_cast<unsigned int>(mi.uordblks));
+#endif
+#else
+  return 0;
+#endif
+}
+#endif
+
 }  // namespace
+
+#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+extern "C" {
+
+struct _reent;
+void* __real__malloc_r(struct _reent* reent, size_t nbytes);
+void* __real__realloc_r(struct _reent* reent, void* ptr, size_t nbytes);
+void __real__free_r(struct _reent* reent, void* ptr);
+
+void* __wrap__malloc_r(struct _reent* reent, size_t nbytes) {
+  const size_t payload = nbytes == 0 ? 1U : nbytes;
+  if (payload > UINT32_MAX - sizeof(HeapBlockHeader)) {
+    ++gHeapFailedAllocs;
+    logHeapFault("OOM_OVERFLOW", static_cast<unsigned>(nbytes));
+    return nullptr;
+  }
+  auto* hdr = static_cast<HeapBlockHeader*>(__real__malloc_r(reent, sizeof(HeapBlockHeader) + payload));
+  if (!hdr) {
+    ++gHeapFailedAllocs;
+    logHeapFault("OOM_MALLOC", static_cast<unsigned>(nbytes));
+    return nullptr;
+  }
+  hdr->magic = kHeapBlockMagic;
+  hdr->size = static_cast<uint32_t>(payload);
+  gHeapLiveBytes += payload;
+  if (gHeapLiveBytes > gHeapPeakBytes) {
+    gHeapPeakBytes = gHeapLiveBytes;
+  }
+  ++gHeapLiveBlocks;
+  ++gHeapTotalAllocs;
+  return hdr + 1;
+}
+
+void __wrap__free_r(struct _reent* reent, void* ptr) {
+  if (!ptr) return;
+  auto* hdr = static_cast<HeapBlockHeader*>(ptr) - 1;
+  if (hdr->magic != kHeapBlockMagic) {
+    ++gHeapBadFrees;
+    logHeapFault(hdr->magic == kHeapFreedMagic ? "DOUBLE_FREE" : "BAD_FREE",
+                 static_cast<unsigned>(reinterpret_cast<uintptr_t>(ptr)));
+    return;
+  }
+  const size_t oldSize = hdr->size;
+  hdr->magic = kHeapFreedMagic;
+  hdr->size = 0;
+  gHeapLiveBytes = (gHeapLiveBytes >= oldSize) ? (gHeapLiveBytes - oldSize) : 0;
+  if (gHeapLiveBlocks > 0) {
+    --gHeapLiveBlocks;
+  }
+  __real__free_r(reent, hdr);
+}
+
+void* __wrap__realloc_r(struct _reent* reent, void* ptr, size_t nbytes) {
+  if (!ptr) {
+    return __wrap__malloc_r(reent, nbytes);
+  }
+  if (nbytes == 0) {
+    __wrap__free_r(reent, ptr);
+    return nullptr;
+  }
+  if (nbytes > UINT32_MAX - sizeof(HeapBlockHeader)) {
+    ++gHeapFailedAllocs;
+    logHeapFault("OOM_REALLOC_OVERFLOW", static_cast<unsigned>(nbytes));
+    return nullptr;
+  }
+  auto* oldHdr = static_cast<HeapBlockHeader*>(ptr) - 1;
+  if (oldHdr->magic != kHeapBlockMagic) {
+    ++gHeapBadFrees;
+    logHeapFault("BAD_REALLOC", static_cast<unsigned>(reinterpret_cast<uintptr_t>(ptr)));
+    return nullptr;
+  }
+  const size_t oldSize = oldHdr->size;
+  auto* newHdr = static_cast<HeapBlockHeader*>(__real__realloc_r(reent, oldHdr, sizeof(HeapBlockHeader) + nbytes));
+  if (!newHdr) {
+    ++gHeapFailedAllocs;
+    logHeapFault("OOM_REALLOC", static_cast<unsigned>(nbytes));
+    return nullptr;
+  }
+  newHdr->magic = kHeapBlockMagic;
+  newHdr->size = static_cast<uint32_t>(nbytes);
+  gHeapLiveBytes = (gHeapLiveBytes >= oldSize) ? (gHeapLiveBytes - oldSize + nbytes) : nbytes;
+  if (gHeapLiveBytes > gHeapPeakBytes) {
+    gHeapPeakBytes = gHeapLiveBytes;
+  }
+  ++gHeapTotalAllocs;
+  return newHdr + 1;
+}
+
+// Playdate SDK's setup.c redirects _malloc_r/_realloc_r/_free_r to pd->system->realloc
+// without overriding newlib's _calloc_r, which otherwise inspects [ptr - 4] expecting a
+// dlmalloc chunk header. Allocate through __wrap__malloc_r and zero the exact byte count.
+void* __wrap__calloc_r(struct _reent* reent, size_t nmemb, size_t size) {
+  if (size != 0 && nmemb > std::numeric_limits<size_t>::max() / size) {
+    ++gHeapFailedAllocs;
+    logHeapFault("OOM_CALLOC_OVERFLOW", static_cast<unsigned>(nmemb));
+    return nullptr;
+  }
+  const size_t total = nmemb * size;
+  void* ptr = __wrap__malloc_r(reent, total);
+  if (ptr && total > 0) {
+    std::memset(ptr, 0, total);
+  }
+  return ptr;
+}
+
+}  // extern "C"
+#endif
 
 namespace playdate_hal {
 
@@ -87,6 +250,39 @@ void setLoopRefreshHints(bool skipLoopDelay, bool foregroundReader) {
   gSkipLoopDelay = skipLoopDelay;
   gForegroundReader = foregroundReader;
   applyRefreshRate();
+}
+
+void resetHeapBaseline() {
+#if !defined(TARGET_PLAYDATE) || defined(TARGET_SIMULATOR)
+  gSimBaselineBytes = readSimulatorRawAllocatedBytes();
+  gSimPeakBytes = 0;
+#endif
+}
+
+HeapTelemetry getHeapTelemetry() {
+  HeapTelemetry out;
+  out.budgetBytes = kPlaydateHeapBudgetBytes;
+#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+  out.liveBytes = gHeapLiveBytes;
+  out.peakBytes = gHeapPeakBytes;
+  out.liveBlocks = gHeapLiveBlocks;
+  out.totalAllocs = gHeapTotalAllocs;
+  out.failedAllocs = gHeapFailedAllocs;
+  out.badFrees = gHeapBadFrees;
+#else
+  const size_t raw = readSimulatorRawAllocatedBytes();
+  if (gSimBaselineBytes == 0 && raw > 0) {
+    gSimBaselineBytes = raw;
+  }
+  out.liveBytes = (raw >= gSimBaselineBytes) ? (raw - gSimBaselineBytes) : 0;
+  if (out.liveBytes > gSimPeakBytes) {
+    gSimPeakBytes = out.liveBytes;
+  }
+  out.peakBytes = gSimPeakBytes;
+#endif
+  out.freeBytes = (out.budgetBytes > out.liveBytes) ? (out.budgetBytes - out.liveBytes) : 0;
+  out.minFreeBytes = (out.budgetBytes > out.peakBytes) ? (out.budgetBytes - out.peakBytes) : 0;
+  return out;
 }
 
 }  // namespace playdate_hal
@@ -136,13 +332,17 @@ size_t HardwareSerial::write(const uint8_t* buffer, size_t size) {
   for (size_t i = 0; i < size; ++i) {
     const char c = static_cast<char>(buffer[i]);
     if (c == '\r') continue;
-    if (c == '\n') {
-      if (gPlaydateApi && gPlaydateApi->system) {
-        gPlaydateApi->system->logToConsole("%s", gSerialLineBuffer.c_str());
+    if (c == '\n' || gSerialLineLen + 1 >= kSerialLineBufCap) {
+      gSerialLineBuf[gSerialLineLen] = '\0';
+      if (gPlaydateApi && gPlaydateApi->system && gPlaydateApi->system->logToConsole) {
+        gPlaydateApi->system->logToConsole("%s", gSerialLineBuf);
       }
-      gSerialLineBuffer.clear();
+      gSerialLineLen = 0;
+      if (c != '\n') {
+        gSerialLineBuf[gSerialLineLen++] = c;
+      }
     } else {
-      gSerialLineBuffer.push_back(c);
+      gSerialLineBuf[gSerialLineLen++] = c;
     }
   }
   return size;
@@ -156,13 +356,18 @@ void EspClass::restart() {
   }
 }
 
-uint32_t EspClass::getFreeHeap() const { return 12 * 1024 * 1024; }
+uint32_t EspClass::getFreeHeap() const { return static_cast<uint32_t>(playdate_hal::getHeapTelemetry().freeBytes); }
 
-uint32_t EspClass::getHeapSize() const { return 16 * 1024 * 1024; }
+uint32_t EspClass::getHeapSize() const { return static_cast<uint32_t>(playdate_hal::getHeapTelemetry().budgetBytes); }
 
-uint32_t EspClass::getMinFreeHeap() const { return 8 * 1024 * 1024; }
+uint32_t EspClass::getMinFreeHeap() const {
+  return static_cast<uint32_t>(playdate_hal::getHeapTelemetry().minFreeBytes);
+}
 
-uint32_t EspClass::getMaxAllocHeap() const { return 8 * 1024 * 1024; }
+uint32_t EspClass::getMaxAllocHeap() const {
+  // Playdate OS does not expose largest-contiguous-block queries; report remaining budget.
+  return static_cast<uint32_t>(playdate_hal::getHeapTelemetry().freeBytes);
+}
 
 const char* EspClass::getSdkVersion() const { return "PlaydateSDK-3.1.2"; }
 
@@ -171,6 +376,7 @@ const char* EspClass::getChipModel() const { return "Playdate ARM Cortex-M7"; }
 namespace HalSystem {
 
 void begin() {
+  playdate_hal::resetHeapBaseline();
   BoardConfig::ACTIVE.name = "Panic Playdate";
   BoardConfig::ACTIVE.displayWidth = HalDisplay::DISPLAY_WIDTH;
   BoardConfig::ACTIVE.displayHeight = HalDisplay::DISPLAY_HEIGHT;
@@ -200,11 +406,12 @@ HalMemory::PsramBuffer HalMemory::allocatePsram(size_t bytes) {
 HalMemory::HeapStats HalMemory::getDefaultHeap() { return getInternalHeap(); }
 
 HalMemory::HeapStats HalMemory::getInternalHeap() {
+  const playdate_hal::HeapTelemetry t = playdate_hal::getHeapTelemetry();
   return HeapStats{
-      .freeBytes = 12 * 1024 * 1024,
-      .totalBytes = 16 * 1024 * 1024,
-      .minFreeBytes = 8 * 1024 * 1024,
-      .largestBlockBytes = 8 * 1024 * 1024,
+      .freeBytes = t.freeBytes,
+      .totalBytes = t.budgetBytes,
+      .minFreeBytes = t.minFreeBytes,
+      .largestBlockBytes = t.freeBytes,
   };
 }
 
@@ -279,10 +486,9 @@ bool HalClock::localTime(struct tm& out) const {
   }
   const uint32_t pdEpoch = gPlaydateApi->system->getSecondsSinceEpoch(nullptr);
   const int32_t tzOffset = gPlaydateApi->system->getTimezoneOffset ? gPlaydateApi->system->getTimezoneOffset() : 0;
-  const uint32_t localPdEpoch =
-      (tzOffset >= 0 || static_cast<uint32_t>(-tzOffset) <= pdEpoch)
-          ? static_cast<uint32_t>(static_cast<int64_t>(pdEpoch) + tzOffset)
-          : pdEpoch;
+  const uint32_t localPdEpoch = (tzOffset >= 0 || static_cast<uint32_t>(-tzOffset) <= pdEpoch)
+                                    ? static_cast<uint32_t>(static_cast<int64_t>(pdEpoch) + tzOffset)
+                                    : pdEpoch;
 
   PDDateTime dt{};
   gPlaydateApi->system->convertEpochToDateTime(localPdEpoch, &dt);

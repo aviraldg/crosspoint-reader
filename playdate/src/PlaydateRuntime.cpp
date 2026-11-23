@@ -228,6 +228,70 @@ void installBundledManual() {
 }
 
 unsigned long gLastActivityTimeMs = 0;
+unsigned long gLastDiagTickMs = 0;
+unsigned long gLastHttpWatchLogMs = 0;
+uint32_t gLastLoggedVisit = UINT32_MAX;
+size_t gLastLoggedHeapPeak = 0;
+size_t gLastLoggedStackPeak = 0;
+bool gLoggedCanaryFault = false;
+
+constexpr uint32_t kFiberStackCanary = 0xDEADBEEFU;
+constexpr uint8_t kFiberStackWatermarkByte = 0xA5U;
+constexpr size_t kHeapPeakLogStepBytes = 64 * 1024;
+constexpr size_t kStackPeakLogStepBytes = 4 * 1024;
+constexpr unsigned long kDiagTickIntervalMs = 1000;
+constexpr unsigned long kHttpWatchLogIntervalMs = 15000;
+
+size_t gFiberStackLowestTouchedOffset = 0;
+
+void paintFiberStack(uint8_t* base, size_t size) {
+  if (!base || size < sizeof(kFiberStackCanary)) return;
+  std::memset(base, kFiberStackWatermarkByte, size);
+  std::memcpy(base, &kFiberStackCanary, sizeof(kFiberStackCanary));
+  gFiberStackLowestTouchedOffset = size;
+  gLoggedCanaryFault = false;
+}
+
+void runPeriodicDiagnostics() {
+  const uint32_t currentVisit = activityManager.visit();
+  if (currentVisit != gLastLoggedVisit) {
+    gLastLoggedVisit = currentVisit;
+    playdate_hal::logMemorySnapshot("activity_change");
+  }
+
+  const unsigned long now = millis();
+  if (now - gLastDiagTickMs < kDiagTickIntervalMs) {
+    return;
+  }
+  gLastDiagTickMs = now;
+
+  // Reap retired HTTP connections in the background even when no further network
+  // requests are made (e.g., while reading after an OPDS download or KOReader sync).
+  playdate_hal::reapRetiredHttpConnections(/*forceAll=*/false);
+
+  if (!playdate_hal::isFiberStackCanaryIntact() && !gLoggedCanaryFault) {
+    gLoggedCanaryFault = true;
+    LOG_ERR("MEM", "FIBER STACK CANARY CORRUPTED! stackSize=%u",
+            static_cast<unsigned>(playdate_hal::getFiberStackSizeBytes()));
+    playdate_hal::logMemorySnapshot("stack_canary_corrupt");
+  }
+
+  const playdate_hal::HeapTelemetry heap = playdate_hal::getHeapTelemetry();
+  const size_t stackPeak = playdate_hal::getFiberStackPeakUsedBytes();
+  const playdate_hal::HttpTelemetry http = playdate_hal::getHttpTelemetry();
+
+  if (heap.peakBytes >= gLastLoggedHeapPeak + kHeapPeakLogStepBytes) {
+    gLastLoggedHeapPeak = heap.peakBytes;
+    playdate_hal::logMemorySnapshot("heap_peak");
+  } else if (stackPeak >= gLastLoggedStackPeak + kStackPeakLogStepBytes) {
+    gLastLoggedStackPeak = stackPeak;
+    playdate_hal::logMemorySnapshot("stack_peak");
+  } else if ((http.activeConnections > 0 || http.retiredConnections > 0) &&
+             (now - gLastHttpWatchLogMs >= kHttpWatchLogIntervalMs)) {
+    gLastHttpWatchLogMs = now;
+    playdate_hal::logMemorySnapshot("http_watch");
+  }
+}
 
 void stepCrossPointFrame() {
   playdate_serial::pumpSerialBridge();
@@ -239,6 +303,7 @@ void stepCrossPointFrame() {
   }
 
   activityManager.loop();
+  runPeriodicDiagnostics();
 
   const bool skipLoopDelay = activityManager.skipLoopDelay();
   if (skipLoopDelay) {
@@ -273,10 +338,12 @@ struct ArmFiberContext {
   uint32_t sp;
 };
 
-constexpr size_t kDeviceFiberStackSize = 64 * 1024;
+// 96 KB fiber stack (~1.1% of Playdate's 8.38 MB RAM) leaves headroom for deep EPUB
+// HTML/CSS parsing, font decompression, cover decoding, and nested network callbacks.
+constexpr size_t kDeviceFiberStackSize = 96 * 1024;
 ArmFiberContext gHostCtx{};
 ArmFiberContext gFiberCtx{};
-uint8_t* gFiberStack = nullptr;
+std::unique_ptr<uint8_t[]> gFiberStack;
 bool gFiberInitialized = false;
 bool gInFiber = false;
 bool gYielded = false;
@@ -314,6 +381,22 @@ void armInitContext(ArmFiberContext* ctx, void (*entry)(), void* stackTop) {
 #else
 bool gYielded = false;
 #endif
+
+const uint8_t* getFiberStackBaseAndSize(size_t& sizeOut) {
+#if defined(TARGET_SIMULATOR)
+  if (!gFiberStack.empty()) {
+    sizeOut = gFiberStack.size();
+    return gFiberStack.data();
+  }
+#elif defined(TARGET_PLAYDATE)
+  if (gFiberStack) {
+    sizeOut = kDeviceFiberStackSize;
+    return gFiberStack.get();
+  }
+#endif
+  sizeOut = 0;
+  return nullptr;
+}
 
 void onMenuReaderMenu(void* userdata) {
   (void)userdata;
@@ -363,7 +446,10 @@ int updateCallback(void* userdata) {
 #if defined(TARGET_SIMULATOR)
   if (!gFiberInitialized) {
     if (getcontext(&gFiberCtx) == 0) {
-      gFiberStack.resize(kSimulatorFiberStackSize);
+      if (gFiberStack.size() != kSimulatorFiberStackSize) {
+        gFiberStack.resize(kSimulatorFiberStackSize);
+        paintFiberStack(gFiberStack.data(), gFiberStack.size());
+      }
       gFiberCtx.uc_stack.ss_sp = gFiberStack.data();
       gFiberCtx.uc_stack.ss_size = gFiberStack.size();
       gFiberCtx.uc_link = &gHostCtx;
@@ -380,7 +466,7 @@ int updateCallback(void* userdata) {
   }
 #elif defined(TARGET_PLAYDATE)
   if (!gFiberInitialized && gFiberStack != nullptr) {
-    armInitContext(&gFiberCtx, deviceFiberEntry, gFiberStack + kDeviceFiberStackSize);
+    armInitContext(&gFiberCtx, deviceFiberEntry, gFiberStack.get() + kDeviceFiberStackSize);
     gFiberInitialized = true;
   }
   if (gFiberInitialized) {
@@ -397,9 +483,20 @@ int updateCallback(void* userdata) {
 }
 
 void initCrossPointOnPlaydate(PlaydateAPI* pd) {
-#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+  playdate_hal::resetHeapBaseline();
+#if defined(TARGET_SIMULATOR)
+  if (gFiberStack.size() != kSimulatorFiberStackSize) {
+    gFiberStack.resize(kSimulatorFiberStackSize);
+    paintFiberStack(gFiberStack.data(), gFiberStack.size());
+  }
+#elif defined(TARGET_PLAYDATE)
   if (!gFiberStack) {
-    gFiberStack = static_cast<uint8_t*>(std::malloc(kDeviceFiberStackSize));
+    gFiberStack = makeUniqueNoThrow<uint8_t[]>(kDeviceFiberStackSize);
+    if (gFiberStack) {
+      paintFiberStack(gFiberStack.get(), kDeviceFiberStackSize);
+    } else {
+      LOG_ERR("MEM", "Failed to allocate %u-byte device fiber stack", static_cast<unsigned>(kDeviceFiberStackSize));
+    }
   }
 #endif
   HalSystem::begin();
@@ -454,6 +551,11 @@ void initCrossPointOnPlaydate(PlaydateAPI* pd) {
     activityManager.goHome();
   }
   activityManager.loop();
+  gLastLoggedVisit = activityManager.visit();
+  gLastDiagTickMs = millis();
+  gLastLoggedHeapPeak = playdate_hal::getHeapTelemetry().peakBytes;
+  gLastLoggedStackPeak = playdate_hal::getFiberStackPeakUsedBytes();
+  playdate_hal::logMemorySnapshot("boot_done");
   playdate_hal::setLoopRefreshHints(activityManager.skipLoopDelay(), activityManager.isForegroundReader());
 }
 
@@ -477,6 +579,69 @@ void WifiSelectionActivity::loop() {}
 void WifiSelectionActivity::render(RenderLock&&) {}
 
 namespace playdate_hal {
+
+size_t getFiberStackSizeBytes() {
+  size_t sz = 0;
+  getFiberStackBaseAndSize(sz);
+  return sz;
+}
+
+bool isFiberStackCanaryIntact() {
+  size_t sz = 0;
+  const uint8_t* base = getFiberStackBaseAndSize(sz);
+  if (!base || sz < sizeof(kFiberStackCanary)) {
+    return true;
+  }
+  uint32_t canary = 0;
+  std::memcpy(&canary, base, sizeof(canary));
+  return canary == kFiberStackCanary;
+}
+
+size_t getFiberStackPeakUsedBytes() {
+  size_t sz = 0;
+  const uint8_t* base = getFiberStackBaseAndSize(sz);
+  if (!base || sz <= sizeof(kFiberStackCanary)) {
+    return 0;
+  }
+  if (!isFiberStackCanaryIntact()) {
+    gFiberStackLowestTouchedOffset = 0;
+    return sz;
+  }
+  const size_t limit = std::min(gFiberStackLowestTouchedOffset, sz);
+  size_t offset = sizeof(kFiberStackCanary);
+  while (offset < limit && base[offset] == kFiberStackWatermarkByte) {
+    ++offset;
+  }
+  if (offset < gFiberStackLowestTouchedOffset) {
+    gFiberStackLowestTouchedOffset = offset;
+  }
+  const size_t clamped = std::min(gFiberStackLowestTouchedOffset, sz);
+  return sz - clamped;
+}
+
+size_t getFiberStackMinFreeBytes() {
+  const size_t sz = getFiberStackSizeBytes();
+  const size_t used = getFiberStackPeakUsedBytes();
+  return (sz > used) ? (sz - used) : 0;
+}
+
+void logMemorySnapshot(const char* reason) {
+  const HeapTelemetry heap = getHeapTelemetry();
+  const HttpTelemetry http = getHttpTelemetry();
+  const size_t stackSize = getFiberStackSizeBytes();
+  const size_t stackPeak = getFiberStackPeakUsedBytes();
+  const bool canaryOk = isFiberStackCanaryIntact();
+  LOG_INF("MEM",
+          "reason=%s visit=%u heapLive=%u heapPeak=%u heapFree=%u blocks=%u fails=%u badFrees=%u "
+          "stackPeak=%u/%u canary=%d httpActive=%u httpRetired=%u httpReaped=%u",
+          reason ? reason : "periodic", static_cast<unsigned>(activityManager.visit()),
+          static_cast<unsigned>(heap.liveBytes), static_cast<unsigned>(heap.peakBytes),
+          static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.liveBlocks),
+          static_cast<unsigned>(heap.failedAllocs), static_cast<unsigned>(heap.badFrees),
+          static_cast<unsigned>(stackPeak), static_cast<unsigned>(stackSize), canaryOk ? 1 : 0,
+          static_cast<unsigned>(http.activeConnections), static_cast<unsigned>(http.retiredConnections),
+          static_cast<unsigned>(http.reapedConnections));
+}
 
 void pumpMainLoop() {
 #if defined(TARGET_SIMULATOR)
@@ -638,6 +803,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
     case kEventTerminate:
       activityManager.prepareForSleep();
       fontCacheManager.clearCache();
+      playdate_hal::reapRetiredHttpConnections(/*forceAll=*/true);
+      playdate_hal::releasePendingHttpAccessContexts();
+#if defined(TARGET_PLAYDATE) && !defined(TARGET_SIMULATOR)
+      if (!gInFiber) {
+        gFiberStack.reset();
+        gFiberInitialized = false;
+      }
+#endif
       playdate_hal::setPlaydateAPI(nullptr);
       break;
     default:

@@ -1,7 +1,8 @@
-#include <SecureHttpClient.h>
-
 #include <Arduino.h>
+#include <Logging.h>
+#include <Memory.h>
 #include <PlaydateRuntime.h>
+#include <SecureHttpClient.h>
 #include <base64.h>
 
 extern "C" {
@@ -20,30 +21,159 @@ namespace freeink {
 namespace {
 
 constexpr size_t kReadChunkSize = 2048;
+constexpr size_t kMaxAllowedHostEntries = 16;
+constexpr size_t kMaxAbandonedAccessEntries = 8;
+constexpr int32_t kClosedReapDelayMs = 9000;
+constexpr int32_t kBurstClosedReapDelayMs = 8000;
+constexpr int32_t kBurstFallbackReapDelayMs = 20000;
+constexpr int32_t kUnclosedFallbackReapDelayMs = 35000;
+constexpr size_t kRetiredBurstThreshold = 12;
 
-struct AccessWaitState {
-  volatile bool decided = false;
-  volatile bool allowed = false;
+uint32_t gTotalRequests = 0;
+uint32_t gActiveConnections = 0;
+uint32_t gReapedConnections = 0;
+uint32_t gFailedRequests = 0;
+
+const char* netErrName(PDNetErr err) {
+  switch (err) {
+    case NET_OK:
+      return "OK";
+    case NET_NO_DEVICE:
+      return "NO_DEVICE";
+    case NET_BUSY:
+      return "BUSY";
+    case NET_WRITE_ERROR:
+      return "WRITE_ERR";
+    case NET_WRITE_BUSY:
+      return "WRITE_BUSY";
+    case NET_WRITE_TIMEOUT:
+      return "WRITE_TIMEOUT";
+    case NET_READ_ERROR:
+      return "READ_ERR";
+    case NET_READ_BUSY:
+      return "READ_BUSY";
+    case NET_READ_TIMEOUT:
+      return "READ_TIMEOUT";
+    case NET_READ_OVERFLOW:
+      return "READ_OVERFLOW";
+    case NET_FRAME_ERROR:
+      return "FRAME_ERR";
+    case NET_BAD_RESPONSE:
+      return "BAD_RESP";
+    case NET_ERROR_RESPONSE:
+      return "ERR_RESP";
+    case NET_RESET_TIMEOUT:
+      return "RESET_TIMEOUT";
+    case NET_BUFFER_TOO_SMALL:
+      return "BUF_SMALL";
+    case NET_UNEXPECTED_RESPONSE:
+      return "UNEXPECTED_RESP";
+    case NET_NOT_CONNECTED_TO_AP:
+      return "NO_AP";
+    case NET_NOT_IMPLEMENTED:
+      return "UNIMPL";
+    case NET_CONNECTION_CLOSED:
+      return "CLOSED";
+  }
+  return "UNKNOWN";
+}
+
+const char* wifiStatusName(PlaydateAPI* pd) {
+  if (!pd || !pd->network || !pd->network->getStatus) return "unknown";
+  switch (pd->network->getStatus()) {
+    case kWifiNotConnected:
+      return "disconnected";
+    case kWifiConnected:
+      return "connected";
+    case kWifiNotAvailable:
+      return "unavailable";
+  }
+  return "unknown";
+}
+
+void paceIdleNetworkWait(PlaydateAPI* pd) {
+  if (pd && pd->system && pd->system->delay) {
+    pd->system->delay(2);
+  }
+  playdate_hal::pumpMainLoop();
+}
+
+struct AllowedHostEntry {
+  std::string host;
+  uint16_t port = 0;
+  bool useSsl = false;
 };
 
-AccessWaitState gAccessWaitState;
+std::vector<AllowedHostEntry>& allowedHosts() {
+  static std::vector<AllowedHostEntry> cache;
+  return cache;
+}
+
+bool isHostCachedAllowed(const std::string& host, uint16_t port, bool useSsl) {
+  const auto& cache = allowedHosts();
+  return std::any_of(cache.begin(), cache.end(),
+                     [&](const AllowedHostEntry& e) { return e.port == port && e.useSsl == useSsl && e.host == host; });
+}
+
+void rememberAllowedHost(const std::string& host, uint16_t port, bool useSsl) {
+  if (isHostCachedAllowed(host, port, useSsl)) return;
+  auto& cache = allowedHosts();
+  if (cache.size() >= kMaxAllowedHostEntries) {
+    cache.erase(cache.begin());
+  }
+  cache.push_back(AllowedHostEntry{host, port, useSsl});
+}
+
+struct AccessWaitState {
+  std::string host;
+  volatile bool decided = false;
+  volatile bool allowed = false;
+  volatile bool abandoned = false;
+};
+
+// Retains timed-out or aborted requestAccess contexts until Playdate OS delivers
+// onAccessResponse (or the game terminates), avoiding UAF on the prompt's host string.
+std::vector<std::unique_ptr<AccessWaitState>>& abandonedAccessContexts() {
+  static std::vector<std::unique_ptr<AccessWaitState>> list;
+  return list;
+}
 
 void onAccessResponse(bool allowed, void* userdata) {
   auto* state = static_cast<AccessWaitState*>(userdata);
   if (!state) return;
   state->allowed = allowed;
   state->decided = true;
+  if (state->abandoned) {
+    auto& abandoned = abandonedAccessContexts();
+    auto it = std::find_if(abandoned.begin(), abandoned.end(),
+                           [state](const std::unique_ptr<AccessWaitState>& p) { return p.get() == state; });
+    if (it != abandoned.end()) {
+      abandoned.erase(it);
+    }
+  }
+}
+
+bool isPlaydateAutoRedirectStatus(int status) {
+  return status == 301 || status == 302 || status == 303 || status == 307;
 }
 
 struct RequestCallbackState {
+  uint32_t reqId = 0;
   std::string host;
   std::string path;
   std::string headerBlob;
   std::string payloadBlob;
   std::vector<uint8_t> readBuf;
   std::vector<std::pair<std::string, std::string>> headers;
+  std::string interceptedRedirectLocation;
+  std::string firstRedirectLocation;
   size_t contentLength = 0;
+  int interceptedRedirectStatus = 0;
   bool haveContentLength = false;
+  bool chunkedTransfer = false;
+  bool closeIssued = false;
+  volatile bool inRedirectHop = false;
+  volatile bool redirectReady = false;
   volatile bool headersRead = false;
   volatile bool bodyAvailable = false;
   volatile bool requestComplete = false;
@@ -56,7 +186,7 @@ void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) 
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
-  if (!state || state->retired || state->headers.size() >= 64) return;
+  if (!state || state->retired) return;
 
   std::string name(key);
   std::transform(name.begin(), name.end(), name.begin(),
@@ -65,8 +195,54 @@ void onHeaderReceived(HTTPConnection* conn, const char* key, const char* value) 
   while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
   while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
 
+  const int st = pd->network->http->getResponseStatus ? pd->network->http->getResponseStatus(conn) : 0;
+
+  if (name == "location" && !val.empty() && state->firstRedirectLocation.empty()) {
+    state->firstRedirectLocation = val;
+  }
+
+  if (isPlaydateAutoRedirectStatus(st)) {
+    // Playdate OS intercepts 301/302/303/307 before firing onHeadersRead and attempts an
+    // internal reconnect that fails after 2 hops and UAFs SSL contexts on SDK 3.0.x.
+    // Capture the first hop's Location so SecureHttpClient::sendRequest follows cleanly.
+    if (!state->inRedirectHop) {
+      state->inRedirectHop = true;
+      state->headers.clear();
+      state->haveContentLength = false;
+      state->contentLength = 0;
+      state->chunkedTransfer = false;
+    }
+    state->interceptedRedirectStatus = st;
+    if (name == "location" && !val.empty() && state->interceptedRedirectLocation.empty()) {
+      state->interceptedRedirectLocation = val;
+      state->redirectReady = true;
+    }
+    return;
+  }
+
+  if (state->inRedirectHop) {
+    state->inRedirectHop = false;
+    state->redirectReady = false;
+    state->requestComplete = false;
+    state->connectionClosed = false;
+    state->headers.clear();
+    state->haveContentLength = false;
+    state->contentLength = 0;
+    state->chunkedTransfer = false;
+  }
+
+  if (state->headers.size() >= 64) return;
   state->headers.emplace_back(name, val);
-  if (name == "content-length") {
+  if (name == "transfer-encoding") {
+    std::string lowerVal = val;
+    std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowerVal.find("chunked") != std::string::npos) {
+      state->chunkedTransfer = true;
+      state->haveContentLength = false;
+      state->contentLength = 0;
+    }
+  } else if (name == "content-length" && !state->chunkedTransfer) {
     state->contentLength = static_cast<size_t>(std::strtoul(val.c_str(), nullptr, 10));
     state->haveContentLength = true;
   }
@@ -77,7 +253,22 @@ void onHeadersRead(HTTPConnection* conn) {
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
-  if (state && !state->retired) state->headersRead = true;
+  if (!state || state->retired) return;
+  if (state->inRedirectHop) {
+    const int st = pd->network->http->getResponseStatus ? pd->network->http->getResponseStatus(conn) : 0;
+    const bool stillRedirect = isPlaydateAutoRedirectStatus(st);
+    state->inRedirectHop = false;
+    state->redirectReady = stillRedirect && !state->interceptedRedirectLocation.empty();
+    state->requestComplete = false;
+    state->connectionClosed = false;
+    state->headers.clear();
+    state->haveContentLength = false;
+    state->contentLength = 0;
+    if (stillRedirect && !state->interceptedRedirectLocation.empty()) {
+      state->headers.emplace_back("location", state->interceptedRedirectLocation);
+    }
+  }
+  state->headersRead = true;
 }
 
 void onResponse(HTTPConnection* conn) {
@@ -97,8 +288,9 @@ void onRequestComplete(HTTPConnection* conn) {
   if (!pd || !pd->network || !pd->network->http) return;
   auto* state = static_cast<RequestCallbackState*>(pd->network->http->getUserdata(conn));
   if (state) {
-    state->headersRead = true;
-    state->bodyAvailable = true;
+    if (!state->retired) {
+      state->bodyAvailable = true;
+    }
     state->requestComplete = true;
   }
 }
@@ -140,27 +332,66 @@ bool ensureHostAccess(const std::string& host, uint16_t port, bool useSsl, uint3
                       const SecureHttpClient::AbortCallback& shouldAbort, bool& abortedOut) {
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http || host.empty()) return false;
+  if (isHostCachedAllowed(host, port, useSsl)) return true;
 
-  std::unique_ptr<char[]> heapHost(new char[host.size() + 1]);
-  std::memcpy(heapHost.get(), host.c_str(), host.size() + 1);
+  auto waitState = makeUniqueNoThrow<AccessWaitState>();
+  if (!waitState) {
+    LOG_ERR("NET", "OOM allocating AccessWaitState (%u bytes)", static_cast<unsigned>(sizeof(AccessWaitState)));
+    return false;
+  }
+  waitState->host = host;
 
-  gAccessWaitState.decided = false;
-  gAccessWaitState.allowed = false;
-  const accessReply status = pd->network->http->requestAccess(
-      heapHost.get(), static_cast<int>(port), useSsl, "CrossPoint network access", onAccessResponse, &gAccessWaitState);
-  if (status == kAccessAllow) return true;
-  if (status == kAccessDeny) return false;
+  const accessReply status =
+      pd->network->http->requestAccess(waitState->host.c_str(), static_cast<int>(port), useSsl,
+                                       "CrossPoint network access", onAccessResponse, waitState.get());
+  if (status == kAccessAllow) {
+    rememberAllowedHost(host, port, useSsl);
+    return true;
+  }
+  if (status == kAccessDeny) {
+    LOG_ERR("NET", "Access denied by Playdate OS for %s:%u (ssl=%d)", host.c_str(), static_cast<unsigned>(port),
+            useSsl ? 1 : 0);
+    return false;
+  }
 
+  LOG_INF("NET", "Waiting for Playdate OS network permission for %s:%u", host.c_str(), static_cast<unsigned>(port));
   const unsigned long deadline = millis() + timeoutMs;
-  while (!gAccessWaitState.decided) {
+  while (!waitState->decided) {
     if (shouldAbort && shouldAbort()) {
       abortedOut = true;
-      return false;
+      break;
     }
-    if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
-    playdate_hal::pumpMainLoop();
+    if (static_cast<int32_t>(millis() - deadline) >= 0) {
+      LOG_ERR("NET", "Timed out waiting for network permission for %s:%u", host.c_str(), static_cast<unsigned>(port));
+      break;
+    }
+    paceIdleNetworkWait(pd);
   }
-  return gAccessWaitState.allowed;
+
+  if (!waitState->decided) {
+    waitState->abandoned = true;
+    auto& abandoned = abandonedAccessContexts();
+    if (abandoned.size() < kMaxAbandonedAccessEntries) {
+      abandoned.push_back(std::move(waitState));
+    } else {
+      // Drop oldest only if already decided; otherwise retain to avoid UAF.
+      auto doneIt = std::find_if(abandoned.begin(), abandoned.end(),
+                                 [](const std::unique_ptr<AccessWaitState>& p) { return p->decided; });
+      if (doneIt != abandoned.end()) {
+        abandoned.erase(doneIt);
+      }
+      abandoned.push_back(std::move(waitState));
+    }
+    return false;
+  }
+
+  const bool allowed = waitState->allowed;
+  if (allowed) {
+    rememberAllowedHost(host, port, useSsl);
+  } else {
+    LOG_ERR("NET", "User denied network access for %s:%u", host.c_str(), static_cast<unsigned>(port));
+  }
+  return allowed;
 }
 
 struct RetiredConnection {
@@ -174,21 +405,45 @@ std::vector<RetiredConnection>& retiredConnections() {
   return list;
 }
 
-void reapRetiredConnections(PlaydateAPI* pd, bool forceOldest = false) {
-  (void)forceOldest;
-  if (!pd || !pd->network || !pd->network->http) return;
+void reapRetiredConnectionsImpl(PlaydateAPI* pd, bool forceAll) {
+  if (!pd || !pd->network || !pd->network->http) {
+    if (forceAll) {
+      retiredConnections().clear();
+    }
+    return;
+  }
   auto& list = retiredConnections();
+  if (list.empty()) return;
+
   const unsigned long now = millis();
+  const bool burstPressure = list.size() > kRetiredBurstThreshold;
   auto it = list.begin();
   while (it != list.end()) {
-    const bool closed = it->state && it->state->connectionClosed && it->state->requestComplete;
+    const bool closed = it->state && (it->state->connectionClosed || it->state->closeIssued);
+    const bool reqDone = it->state && it->state->requestComplete;
+    const uint32_t reqId = it->state ? it->state->reqId : 0;
     const int32_t ageMs = static_cast<int32_t>(now - it->closedAtMs);
-    if (closed && ageMs >= 30000) {
+    const int32_t neededClosedMs = burstPressure ? kBurstClosedReapDelayMs : kClosedReapDelayMs;
+    const int32_t neededFallbackMs = burstPressure ? kBurstFallbackReapDelayMs : kUnclosedFallbackReapDelayMs;
+
+    if (forceAll || (closed && ageMs >= neededClosedMs) || ageMs >= neededFallbackMs) {
+      if (forceAll && it->state && !it->state->connectionClosed && !it->state->closeIssued) {
+        pd->network->http->close(it->conn);
+      }
+      pd->network->http->setUserdata(it->conn, nullptr);
       pd->network->http->release(it->conn);
+      ++gReapedConnections;
       it = list.erase(it);
+      const playdate_hal::HeapTelemetry heap = playdate_hal::getHeapTelemetry();
+      LOG_INF("NET", "req #%u REAP age=%ldms closed=%d reqDone=%d retiredLeft=%u heapLive=%u",
+              static_cast<unsigned>(reqId), static_cast<long>(ageMs), closed ? 1 : 0, reqDone ? 1 : 0,
+              static_cast<unsigned>(list.size()), static_cast<unsigned>(heap.liveBytes));
     } else {
       ++it;
     }
+  }
+  if (list.empty()) {
+    shrinkToFit(list);
   }
 }
 
@@ -298,19 +553,48 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   PlaydateAPI* pd = playdate_hal::pd();
   if (!pd || !pd->network || !pd->network->http || _host.empty()) return -1;
 
-  reapRetiredConnections(pd, /*forceOldest=*/false);
+  reapRetiredConnectionsImpl(pd, /*forceAll=*/false);
 
   const uint32_t effectiveTimeoutMs = std::min<uint32_t>(_timeoutMs, 15000U);
   const bool useSsl = (_scheme == "https");
-  if (!ensureHostAccess(_host, _port, useSsl, effectiveTimeoutMs, shouldAbort, _aborted)) return -1;
+  if (!ensureHostAccess(_host, _port, useSsl, effectiveTimeoutMs, shouldAbort, _aborted)) {
+    ++gFailedRequests;
+    return -1;
+  }
 
-  auto state = std::make_unique<RequestCallbackState>();
+  auto state = makeUniqueNoThrow<RequestCallbackState>();
+  if (!state) {
+    ++gFailedRequests;
+    LOG_ERR("NET", "OOM allocating RequestCallbackState (%u bytes)",
+            static_cast<unsigned>(sizeof(RequestCallbackState)));
+    return -1;
+  }
+  const uint32_t reqId = ++gTotalRequests;
+  state->reqId = reqId;
   state->host = _host;
   state->path = _path.empty() ? "/" : _path;
   state->readBuf.resize(kReadChunkSize);
 
+  const char* reqMethod = method ? method : "GET";
+  const unsigned long reqStartMs = millis();
+  {
+    const playdate_hal::HeapTelemetry heap = playdate_hal::getHeapTelemetry();
+    LOG_INF("NET", "req #%u START %s %s://%s:%u%s wifi=%s timeout=%ums active=%u retired=%u heapLive=%u",
+            static_cast<unsigned>(reqId), reqMethod, _scheme.c_str(), state->host.c_str(), static_cast<unsigned>(_port),
+            state->path.c_str(), wifiStatusName(pd), static_cast<unsigned>(effectiveTimeoutMs),
+            static_cast<unsigned>(gActiveConnections), static_cast<unsigned>(retiredConnections().size()),
+            static_cast<unsigned>(heap.liveBytes));
+  }
+
   HTTPConnection* conn = pd->network->http->newConnection(state->host.c_str(), static_cast<int>(_port), useSsl);
-  if (!conn) return -1;
+  if (!conn) {
+    ++gFailedRequests;
+    LOG_ERR("NET", "req #%u newConnection failed for %s:%u (ssl=%d, retired=%u)", static_cast<unsigned>(reqId),
+            state->host.c_str(), static_cast<unsigned>(_port), useSsl ? 1 : 0,
+            static_cast<unsigned>(retiredConnections().size()));
+    return -1;
+  }
+  ++gActiveConnections;
 
   pd->network->http->setUserdata(conn, state.get());
   pd->network->http->setConnectTimeout(conn, static_cast<int>(effectiveTimeoutMs));
@@ -339,6 +623,7 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     int rangeEnd = 0;
     if (parseByteRange(h, rangeStart, rangeEnd)) {
       pd->network->http->setByteRange(conn, rangeStart, rangeEnd);
+      continue;
     }
     if (h.size() >= 11 && strncasecmp(h.c_str(), "Connection:", 11) == 0) {
       hasConnectionHeader = true;
@@ -357,23 +642,57 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
 
   const char* headersPtr = state->headerBlob.empty() ? nullptr : state->headerBlob.c_str();
   const size_t headersLen = state->headerBlob.size();
-  const char* reqMethod = method ? method : "GET";
   PDNetErr err = NET_OK;
   if (std::strcmp(reqMethod, "GET") == 0 && payloadSize == 0) {
     err = pd->network->http->get(conn, state->path.c_str(), headersPtr, headersLen);
   } else if (std::strcmp(reqMethod, "POST") == 0) {
     err = pd->network->http->post(conn, state->path.c_str(), headersPtr, headersLen, payloadPtr, payloadSize);
   } else {
-    err = pd->network->http->query(conn, reqMethod, state->path.c_str(), headersPtr, headersLen, payloadPtr, payloadSize);
+    err =
+        pd->network->http->query(conn, reqMethod, state->path.c_str(), headersPtr, headersLen, payloadPtr, payloadSize);
   }
 
-  auto cleanupConn = [&]() {
+  bool connCleanedUp = false;
+  auto cleanupConn = [&](const char* reason) {
+    if (connCleanedUp) return;
+    connCleanedUp = true;
+    const PDNetErr finalErr = pd->network->http->getError ? pd->network->http->getError(conn) : NET_OK;
+    const unsigned long elapsedMs = millis() - reqStartMs;
+    const playdate_hal::HeapTelemetry heap = playdate_hal::getHeapTelemetry();
+    LOG_INF("NET",
+            "req #%u END reason=%s status=%d bytes=%u/%u complete=%d aborted=%d cbAbort=%d "
+            "netErr=%d(%s) reqDone=%d closed=%d ms=%lu heapLive=%u stackPeak=%u",
+            static_cast<unsigned>(reqId), reason, _status, static_cast<unsigned>(_downloaded),
+            static_cast<unsigned>(_haveContentLength ? _contentLength : 0), _bodyComplete ? 1 : 0, _aborted ? 1 : 0,
+            _callbackAborted ? 1 : 0, static_cast<int>(finalErr), netErrName(finalErr),
+            (state && state->requestComplete) ? 1 : 0, (state && state->connectionClosed) ? 1 : 0, elapsedMs,
+            static_cast<unsigned>(heap.liveBytes), static_cast<unsigned>(playdate_hal::getFiberStackPeakUsedBytes()));
+
     if (state) {
       state->retired = true;
       state->readBuf.clear();
-      state->readBuf.shrink_to_fit();
+      shrinkToFit(state->readBuf);
       state->headers.clear();
-      state->headers.shrink_to_fit();
+      shrinkToFit(state->headers);
+      const bool hadRedirectHop = state->interceptedRedirectStatus > 0 || !state->firstRedirectLocation.empty();
+      if (!state->connectionClosed || hadRedirectHop) {
+        pd->network->http->close(conn);
+        state->closeIssued = true;
+        if (hadRedirectHop) {
+          // Playdate OS closes redirected sockets asynchronously (and suppresses onConnectionClosed
+          // when closed by caller); pump briefly so any internal redirect hop tears down before the
+          // caller opens the next HTTPConnection.
+          const unsigned long closeDeadline = millis() + 80U;
+          while (static_cast<int32_t>(millis() - closeDeadline) < 0) {
+            paceIdleNetworkWait(pd);
+          }
+        }
+      }
+    } else {
+      pd->network->http->close(conn);
+    }
+    if (gActiveConnections > 0) {
+      --gActiveConnections;
     }
     // Keep non-null static callbacks and `state` (host, path, headerBlob, payloadBlob)
     // alive inside RetiredConnection until Playdate OS has finished all async timeout/close
@@ -383,34 +702,59 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   };
 
   if (err != NET_OK) {
-    cleanupConn();
+    ++gFailedRequests;
+    LOG_ERR("NET", "req #%u start failed: netErr=%d(%s)", static_cast<unsigned>(reqId), static_cast<int>(err),
+            netErrName(err));
+    cleanupConn("start_err");
     return -1;
   }
 
   unsigned long deadline = millis() + effectiveTimeoutMs;
-  while (!state->headersRead && !state->requestComplete && !state->connectionClosed) {
+  while (!state->headersRead && !state->redirectReady && !state->requestComplete && !state->connectionClosed) {
     if (shouldAbort && shouldAbort()) {
       _aborted = true;
-      cleanupConn();
+      cleanupConn("hdr_abort");
       return -1;
     }
-    if (pd->network->http->getError) {
+    if (!state->redirectReady && pd->network->http->getError) {
       const PDNetErr netErr = pd->network->http->getError(conn);
       if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY && netErr != NET_CONNECTION_CLOSED) {
-        cleanupConn();
+        ++gFailedRequests;
+        LOG_ERR("NET", "req #%u header wait error: netErr=%d(%s)", static_cast<unsigned>(reqId),
+                static_cast<int>(netErr), netErrName(netErr));
+        cleanupConn("hdr_neterr");
         return -1;
       }
     }
     if (static_cast<int32_t>(millis() - deadline) >= 0) {
-      cleanupConn();
+      ++gFailedRequests;
+      LOG_ERR("NET", "req #%u header wait timeout after %ums", static_cast<unsigned>(reqId),
+              static_cast<unsigned>(effectiveTimeoutMs));
+      cleanupConn("hdr_timeout");
       return -1;
     }
-    playdate_hal::pumpMainLoop();
+    paceIdleNetworkWait(pd);
   }
 
-  _status = pd->network->http->getResponseStatus(conn);
+  const int liveStatus = pd->network->http->getResponseStatus(conn);
+  const std::string& redirectLoc =
+      !state->interceptedRedirectLocation.empty() ? state->interceptedRedirectLocation : state->firstRedirectLocation;
+  if ((!state->headersRead || liveStatus <= 0) && !redirectLoc.empty()) {
+    _status = state->interceptedRedirectStatus > 0 ? state->interceptedRedirectStatus : 302;
+    _responseHeaders.clear();
+    _responseHeaders.push_back(Header{"location", redirectLoc});
+    _contentLength = 0;
+    _haveContentLength = false;
+    _bodyComplete = true;
+    LOG_INF("NET", "req #%u REDIRECT status=%d -> %s", static_cast<unsigned>(reqId), _status, redirectLoc.c_str());
+    cleanupConn("redirect_intercept");
+    return _status;
+  }
+
+  _status = liveStatus > 0 ? liveStatus : state->interceptedRedirectStatus;
   if (_status <= 0) {
-    cleanupConn();
+    ++gFailedRequests;
+    cleanupConn("no_status");
     return -1;
   }
 
@@ -421,18 +765,23 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
   _contentLength = state->contentLength;
   _haveContentLength = state->haveContentLength;
 
+  LOG_DBG("NET", "req #%u HEADERS status=%d contentLen=%u hasLen=%d hdrs=%u ms=%lu", static_cast<unsigned>(reqId),
+          _status, static_cast<unsigned>(_contentLength), _haveContentLength ? 1 : 0,
+          static_cast<unsigned>(_responseHeaders.size()), millis() - reqStartMs);
+
   const bool discardBody = _followRedirects > 0 && isRedirectStatus(_status);
   const DataCallback discard = [](const uint8_t*, size_t) { return true; };
   const DataCallback& bodySink = discardBody ? discard : onData;
   _downloaded = 0;
   _reportProgress = !discardBody && static_cast<bool>(_progress);
 
+  const char* exitReason = "done";
   deadline = millis() + effectiveTimeoutMs;
   unsigned long lastDataMs = millis();
   for (;;) {
     if (shouldAbort && shouldAbort()) {
       _aborted = true;
-      cleanupConn();
+      cleanupConn("body_abort");
       return _status;
     }
 
@@ -447,17 +796,18 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
           deadline = lastDataMs + effectiveTimeoutMs;
           if (bodySink && !bodySink(state->readBuf.data(), static_cast<size_t>(n))) {
             _callbackAborted = true;
-            cleanupConn();
+            cleanupConn("sink_abort");
             return _status;
           }
           _downloaded += static_cast<size_t>(n);
           if (_reportProgress && !_progress(_downloaded, _haveContentLength ? _contentLength : 0)) {
             _callbackAborted = true;
-            cleanupConn();
+            cleanupConn("progress_abort");
             return _status;
           }
           if (_haveContentLength && _downloaded >= _contentLength) {
             _bodyComplete = true;
+            exitReason = "content_length";
             break;
           }
           continue;
@@ -469,18 +819,21 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
     if (availAfter <= 0) {
       if (_haveContentLength && _downloaded >= _contentLength) {
         _bodyComplete = true;
+        exitReason = "content_length";
         break;
       }
       if (state->requestComplete || state->connectionClosed) {
-        _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength) || state->requestComplete;
+        _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength);
+        exitReason = state->requestComplete ? "req_complete" : "conn_closed";
         break;
       }
-      if (pd->network->http->getProgress) {
+      if (_haveContentLength && pd->network->http->getProgress) {
         int progRead = 0;
         int progTotal = 0;
         pd->network->http->getProgress(conn, &progRead, &progTotal);
         if (progTotal > 0 && progRead >= progTotal && _downloaded >= static_cast<size_t>(progTotal)) {
           _bodyComplete = true;
+          exitReason = "progress_total";
           break;
         }
       }
@@ -489,6 +842,7 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
       // the stream has been idle for 600ms.
       if (!_haveContentLength && _downloaded > 0 && static_cast<int32_t>(millis() - lastDataMs) >= 600) {
         _bodyComplete = true;
+        exitReason = "chunked_idle";
         break;
       }
     }
@@ -497,21 +851,30 @@ int SecureHttpClient::sendRequestOnce(const char* method, const uint8_t* payload
       const PDNetErr netErr = pd->network->http->getError(conn);
       if (netErr == NET_CONNECTION_CLOSED) {
         _bodyComplete = !_haveContentLength || (_downloaded >= _contentLength);
+        exitReason = "net_closed";
         break;
       }
       if (netErr != NET_OK && netErr != NET_READ_BUSY && netErr != NET_BUSY) {
+        ++gFailedRequests;
+        LOG_ERR("NET", "req #%u body read error: netErr=%d(%s) after %u bytes", static_cast<unsigned>(reqId),
+                static_cast<int>(netErr), netErrName(netErr), static_cast<unsigned>(_downloaded));
+        exitReason = "body_neterr";
         break;
       }
     }
 
     if (static_cast<int32_t>(millis() - deadline) >= 0) {
+      ++gFailedRequests;
+      LOG_ERR("NET", "req #%u body timeout after %u bytes", static_cast<unsigned>(reqId),
+              static_cast<unsigned>(_downloaded));
+      exitReason = "body_timeout";
       break;
     }
 
-    playdate_hal::pumpMainLoop();
+    paceIdleNetworkWait(pd);
   }
 
-  cleanupConn();
+  cleanupConn(exitReason);
   return _status;
 }
 
@@ -595,3 +958,24 @@ std::string SecureHttpClient::hostHeaderFor(const std::string& scheme, const std
 }
 
 }  // namespace freeink
+
+namespace playdate_hal {
+
+HttpTelemetry getHttpTelemetry() {
+  HttpTelemetry out;
+  out.totalRequests = freeink::gTotalRequests;
+  out.activeConnections = freeink::gActiveConnections;
+  out.retiredConnections = static_cast<uint32_t>(freeink::retiredConnections().size());
+  out.reapedConnections = freeink::gReapedConnections;
+  out.failedRequests = freeink::gFailedRequests;
+  return out;
+}
+
+void reapRetiredHttpConnections(bool forceAll) { freeink::reapRetiredConnectionsImpl(pd(), forceAll); }
+
+void releasePendingHttpAccessContexts() {
+  freeink::abandonedAccessContexts().clear();
+  freeink::allowedHosts().clear();
+}
+
+}  // namespace playdate_hal

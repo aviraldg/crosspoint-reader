@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Arduino.h"
+#include "../PlaydateRuntime.h"
 #include "FreeRTOS.h"
 
 using TaskFunction_t = void (*)(void*);
@@ -16,7 +17,7 @@ inline TaskHandle_t xTaskGetCurrentTaskHandle() {
 
 inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) {
   (void)task;
-  return 16384;
+  return static_cast<UBaseType_t>(playdate_hal::getFiberStackMinFreeBytes());
 }
 
 inline BaseType_t xTaskCreate(TaskFunction_t taskCode, const char* name, uint32_t stackDepth, void* parameters,
@@ -39,13 +40,7 @@ inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t taskCode, const char* n
 
 inline void vTaskDelete(TaskHandle_t taskToDelete) { (void)taskToDelete; }
 
-enum eNotifyAction {
-  eNoAction = 0,
-  eSetBits,
-  eIncrement,
-  eSetValueWithOverwrite,
-  eSetValueWithoutOverwrite
-};
+enum eNotifyAction { eNoAction = 0, eSetBits, eIncrement, eSetValueWithOverwrite, eSetValueWithoutOverwrite };
 
 inline BaseType_t xTaskNotify(TaskHandle_t xTaskToNotify, uint32_t ulValue, eNotifyAction eAction) {
   (void)xTaskToNotify;

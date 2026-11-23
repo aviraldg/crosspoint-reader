@@ -22,7 +22,7 @@ set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Generate I18n tables if not yet present
-if(NOT EXISTS "${REPO_ROOT}/lib/I18n/I18nTables.cpp")
+if(NOT EXISTS "${REPO_ROOT}/lib/I18n/I18nKeys.h")
   execute_process(
     COMMAND ${Python3_EXECUTABLE} "${REPO_ROOT}/scripts/gen_i18n.py"
     WORKING_DIRECTORY "${REPO_ROOT}"
@@ -88,8 +88,9 @@ for patch in sorted(glob.glob(os.path.join(patch_dir, '*.patch'))):
 p = pathlib.Path(jpeg_dir) / 'src' / 'jpeg.inl'
 if p.exists():
     txt = p.read_text()
-    txt = txt.replace('if (iWidth > MAX_WIDTH || iHeight > MAX_HEIGHT)', 'if (0)')
-    p.write_text(txt)
+    new_txt = txt.replace('if (iWidth > MAX_WIDTH || iHeight > MAX_HEIGHT)', 'if (0)')
+    if new_txt != txt:
+        p.write_text(new_txt)
 "
 )
 
@@ -263,6 +264,8 @@ set(ALL_CROSSPOINT_DEFINES
   CROSSPOINT_VERSION="2.0.0-playdate"
   CROSSPOINT_GIT_BRANCH="feat/playdate-port"
   CROSSPOINT_PLAYDATE=1
+  ENABLE_SERIAL_LOG=1
+  LOG_LEVEL=2
   CROSSPOINT_CUSTOM_DISPLAY_HAL=1
   CROSSPOINT_DISPLAY_WIDTH=400
   CROSSPOINT_DISPLAY_HEIGHT=240
@@ -317,6 +320,10 @@ target_compile_options(${ACTIVE_TARGET} PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-Wno-strict-prototypes>
   "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstddef -include cstdint>"
 )
-if (NOT TOOLCHAIN STREQUAL "armgcc")
+if (TOOLCHAIN STREQUAL "armgcc")
+  target_link_options(${ACTIVE_TARGET} PRIVATE
+    "-Wl,--wrap=_malloc_r,--wrap=_realloc_r,--wrap=_free_r,--wrap=_calloc_r"
+  )
+else()
   target_link_options(${ACTIVE_TARGET} PRIVATE -Wl,--gc-sections -Wl,--no-undefined)
 endif()

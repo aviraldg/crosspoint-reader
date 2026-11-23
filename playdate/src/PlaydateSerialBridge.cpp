@@ -4,6 +4,7 @@
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <LibraryBuilder.h>
+#include <PlaydateRuntime.h>
 #include <PlaydateSerialBridge.h>
 #include <SecureHttpClient.h>
 #include <base64.h>
@@ -22,6 +23,7 @@
 #include "WifiCredentialStore.h"
 #include "activities/ActivityManager.h"
 #include "components/UITheme.h"
+#include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
 #include "util/PluginEvents.h"
 
@@ -306,9 +308,7 @@ void appendWriteBytes(const std::string& b64) {
   }
 }
 
-void handleWriteData(const std::string& b64) {
-  appendWriteBytes(b64);
-}
+void handleWriteData(const std::string& b64) { appendWriteBytes(b64); }
 
 void handleWriteFlush() {
   JsonDocument doc;
@@ -370,7 +370,8 @@ void handleRemove(const std::string& path) {
   HalFile f = Storage.open(path.c_str());
   const bool isDir = f && f.isDirectory();
   if (f) f.close();
-  const bool ok = isDir ? (Storage.rmdir(path.c_str()) || Storage.removeDir(path.c_str())) : Storage.remove(path.c_str());
+  const bool ok =
+      isDir ? (Storage.rmdir(path.c_str()) || Storage.removeDir(path.c_str())) : Storage.remove(path.c_str());
   if (ok && library::isLibraryBookFile(path)) {
     clearBookCache(path.c_str());
     library::markLibraryIndexDirty();
@@ -394,8 +395,42 @@ void handleRename(const std::string& args) {
   sendLine(ok ? "OK" : "ERR", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"rename failed\"}");
 }
 
+void handleDiag(const std::string& args) {
+  const bool forceReap = (args == "force_reap");
+  playdate_hal::reapRetiredHttpConnections(forceReap);
+  const playdate_hal::HeapTelemetry heap = playdate_hal::getHeapTelemetry();
+  const playdate_hal::HttpTelemetry http = playdate_hal::getHttpTelemetry();
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["uptimeMs"] = static_cast<uint32_t>(millis());
+  doc["visit"] = activityManager.visit();
+  doc["heapLive"] = static_cast<uint32_t>(heap.liveBytes);
+  doc["heapPeak"] = static_cast<uint32_t>(heap.peakBytes);
+  doc["heapFree"] = static_cast<uint32_t>(heap.freeBytes);
+  doc["heapMinFree"] = static_cast<uint32_t>(heap.minFreeBytes);
+  doc["heapBudget"] = static_cast<uint32_t>(heap.budgetBytes);
+  doc["heapBlocks"] = heap.liveBlocks;
+  doc["allocTotal"] = heap.totalAllocs;
+  doc["allocFailures"] = heap.failedAllocs;
+  doc["badFrees"] = heap.badFrees;
+  doc["stackSize"] = static_cast<uint32_t>(playdate_hal::getFiberStackSizeBytes());
+  doc["stackPeakUsed"] = static_cast<uint32_t>(playdate_hal::getFiberStackPeakUsedBytes());
+  doc["stackFreeMin"] = static_cast<uint32_t>(playdate_hal::getFiberStackMinFreeBytes());
+  doc["stackCanaryOk"] = playdate_hal::isFiberStackCanaryIntact();
+  doc["httpTotalReqs"] = http.totalRequests;
+  doc["httpActiveConns"] = http.activeConnections;
+  doc["httpRetiredConns"] = http.retiredConnections;
+  doc["httpReapedConns"] = http.reapedConnections;
+  doc["httpFailedReqs"] = http.failedRequests;
+  std::string out;
+  serializeJson(doc, out);
+  sendLine("OK", out);
+}
+
 void executePendingRelayOnFiber() {
-  const std::string reqPath = gPendingRelayReqPath.empty() ? "/.crosspoint/.serial-relay-req.json" : gPendingRelayReqPath;
+  const std::string reqPath =
+      gPendingRelayReqPath.empty() ? "/.crosspoint/.serial-relay-req.json" : gPendingRelayReqPath;
   gPendingRelay = false;
   gPendingRelayReqPath.clear();
 
@@ -417,15 +452,92 @@ void executePendingRelayOnFiber() {
   const std::string method = reqDoc["method"] | "GET";
   const std::string body = reqDoc["body"] | "";
   const std::string dest = reqDoc["dest"] | "";
+  const std::string mode = reqDoc["mode"] | "";
+  const uint32_t timeoutMs = reqDoc["timeoutMs"] | 30000U;
   if (url.empty()) {
     sendError("missing url");
+    return;
+  }
+
+  if (mode == "downloader_file") {
+    if (dest.empty()) {
+      sendError("missing dest for downloader_file");
+      return;
+    }
+    const size_t slash = dest.rfind('/');
+    if (slash != std::string::npos && slash > 0) {
+      Storage.ensureDirectoryExists(dest.substr(0, slash).c_str());
+    }
+    const HttpDownloader::DownloadError dlErr = HttpDownloader::downloadToFile(url, dest);
+    if (dlErr != HttpDownloader::OK) {
+      JsonDocument errDoc;
+      errDoc["ok"] = false;
+      errDoc["mode"] = "downloader_file";
+      errDoc["downloadError"] = static_cast<int>(dlErr);
+      errDoc["status"] = HttpDownloader::lastStatus();
+      errDoc["error"] = "downloadToFile failed";
+      std::string out;
+      serializeJson(errDoc, out);
+      sendLine("ERR", out);
+      return;
+    }
+    size_t finalSize = 0;
+    HalFile f = Storage.open(dest.c_str(), O_RDONLY);
+    if (f) {
+      finalSize = f.size();
+      f.close();
+    }
+    reloadAfterWrite(dest);
+    JsonDocument doneDoc;
+    doneDoc["ok"] = true;
+    doneDoc["mode"] = "downloader_file";
+    doneDoc["status"] = HttpDownloader::lastStatus();
+    doneDoc["bytes"] = finalSize;
+    std::string out;
+    serializeJson(doneDoc, out);
+    sendLine("OK", out);
+    return;
+  }
+
+  if (mode == "downloader_url") {
+    std::vector<uint8_t> respBody;
+    const bool ok = HttpDownloader::fetchUrl(url, [&](const uint8_t* data, size_t len) {
+      if (respBody.size() + len > 64 * 1024) return false;
+      respBody.insert(respBody.end(), data, data + len);
+      return true;
+    });
+    if (!ok) {
+      JsonDocument errDoc;
+      errDoc["ok"] = false;
+      errDoc["mode"] = "downloader_url";
+      errDoc["status"] = HttpDownloader::lastStatus();
+      errDoc["error"] = "fetchUrl failed";
+      std::string out;
+      serializeJson(errDoc, out);
+      sendLine("ERR", out);
+      return;
+    }
+    constexpr size_t kChunk = 180;
+    for (size_t i = 0; i < respBody.size(); i += kChunk) {
+      const size_t n = std::min(kChunk, respBody.size() - i);
+      const String encoded = base64::encode(respBody.data() + i, n);
+      sendLine("DATA", encoded.c_str());
+    }
+    JsonDocument doneDoc;
+    doneDoc["ok"] = true;
+    doneDoc["mode"] = "downloader_url";
+    doneDoc["status"] = HttpDownloader::lastStatus();
+    doneDoc["bytes"] = respBody.size();
+    std::string out;
+    serializeJson(doneDoc, out);
+    sendLine("OK", out);
     return;
   }
 
   freeink::SecureHttpClient http;
   http.setInsecure();
   http.setUserAgent("CrossPoint");
-  http.setTimeout(30000);
+  http.setTimeout(timeoutMs);
   http.setFollowRedirects(5);
 
   if (!http.begin(url)) {
@@ -453,16 +565,15 @@ void executePendingRelayOnFiber() {
     }
     size_t written = 0;
     bool writeErr = false;
-    const int status = http.sendRequest(
-        method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-        [&](const uint8_t* data, size_t len) {
-          if (outFile.write(data, len) != len) {
-            writeErr = true;
-            return false;
-          }
-          written += len;
-          return true;
-        });
+    const int status = http.sendRequest(method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+                                        [&](const uint8_t* data, size_t len) {
+                                          if (outFile.write(data, len) != len) {
+                                            writeErr = true;
+                                            return false;
+                                          }
+                                          written += len;
+                                          return true;
+                                        });
     outFile.flush();
     outFile.close();
     if (status < 200 || status >= 300 || writeErr || !Storage.replaceFile(partPath.c_str(), dest.c_str())) {
@@ -488,13 +599,12 @@ void executePendingRelayOnFiber() {
   }
 
   std::vector<uint8_t> respBody;
-  const int status = http.sendRequest(
-      method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-      [&](const uint8_t* data, size_t len) {
-        if (respBody.size() + len > 64 * 1024) return false;
-        respBody.insert(respBody.end(), data, data + len);
-        return true;
-      });
+  const int status = http.sendRequest(method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+                                      [&](const uint8_t* data, size_t len) {
+                                        if (respBody.size() + len > 64 * 1024) return false;
+                                        respBody.insert(respBody.end(), data, data + len);
+                                        return true;
+                                      });
   if (status < 0) {
     sendError("http transport failed");
     return;
@@ -535,6 +645,8 @@ void onSerialMessage(const char* data) {
 
   if (cmd == "PING") {
     handlePing();
+  } else if (cmd == "DIAG") {
+    handleDiag(rest);
   } else if (cmd == "STAT") {
     handleStat(rest);
   } else if (cmd == "LIST") {
@@ -565,6 +677,44 @@ void onSerialMessage(const char* data) {
   }
 }
 
+#if defined(TARGET_SIMULATOR)
+constexpr char kSimulatorCmdPath[] = "/.crosspoint/.sim-cmd.txt";
+unsigned long gLastSimCmdPollMs = 0;
+
+void pollSimulatorCommandFile() {
+  const unsigned long now = millis();
+  if (now - gLastSimCmdPollMs < 50) {
+    return;
+  }
+  gLastSimCmdPollMs = now;
+  if (!Storage.exists(kSimulatorCmdPath)) {
+    return;
+  }
+  std::string rawCmds;
+  const bool ok = Storage.readFileToString("SER", kSimulatorCmdPath, 16 * 1024, rawCmds);
+  Storage.remove(kSimulatorCmdPath);
+  if (!ok || rawCmds.empty()) {
+    return;
+  }
+
+  size_t pos = 0;
+  while (pos < rawCmds.size()) {
+    const size_t nl = rawCmds.find('\n', pos);
+    std::string line = (nl == std::string::npos) ? rawCmds.substr(pos) : rawCmds.substr(pos, nl - pos);
+    pos = (nl == std::string::npos) ? rawCmds.size() : (nl + 1);
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+      line.pop_back();
+    }
+    if (line.empty()) continue;
+    onSerialMessage(line.c_str());
+    if (gPendingRelay) {
+      executePendingRelayOnFiber();
+      gLastSerialActivityMs = millis();
+    }
+  }
+}
+#endif
+
 }  // namespace
 
 void registerSerialBridge(PlaydateAPI* pd) {
@@ -574,6 +724,9 @@ void registerSerialBridge(PlaydateAPI* pd) {
 }
 
 void pumpSerialBridge() {
+#if defined(TARGET_SIMULATOR)
+  pollSimulatorCommandFile();
+#endif
   if (gPendingRelay) {
     executePendingRelayOnFiber();
     gLastSerialActivityMs = millis();
