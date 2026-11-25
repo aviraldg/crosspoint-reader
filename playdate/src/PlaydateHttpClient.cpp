@@ -898,6 +898,29 @@ const std::string* SecureHttpClient::getUniqueHeader(const char* lowercaseName) 
   return value;
 }
 
+std::string SecureHttpClient::getCombinedHeader(const char* lowercaseName) const {
+  if (!lowercaseName) return "";
+  size_t bytes = 0;
+  size_t count = 0;
+  for (const auto& header : _responseHeaders) {
+    if (header.name == lowercaseName) {
+      bytes += header.value.size();
+      ++count;
+    }
+  }
+  if (count == 0) return "";
+  std::string out;
+  out.reserve(bytes + (count - 1) * 2);
+  bool first = true;
+  for (const auto& header : _responseHeaders) {
+    if (header.name != lowercaseName) continue;
+    if (!first) out += ", ";
+    out += header.value;
+    first = false;
+  }
+  return out;
+}
+
 std::vector<std::pair<std::string, std::string>> SecureHttpClient::getHeaders() const {
   std::vector<std::pair<std::string, std::string>> out;
   out.reserve(_responseHeaders.size());

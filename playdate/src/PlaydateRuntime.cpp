@@ -144,7 +144,7 @@ void setupFonts() {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
-  sdFontSystem.begin(renderer);
+  sdFontSystem.begin(renderer, smallFontFamily, ui10FontFamily, ui12FontFamily);
 }
 
 // playdate/tools/build_manual.py bundles the manual and its content stamp in the pdx.
@@ -159,9 +159,8 @@ constexpr size_t kManualStampMax = 32;
 constexpr size_t kManualCopyChunk = 4096;
 
 std::string readManualStamp(const char* path) {
-  char buf[kManualStampMax + 1]{};
-  const size_t n = Storage.readFileToBuffer(path, buf, sizeof(buf));
-  std::string stamp(buf, n);
+  std::string stamp;
+  Storage.readFileToString("MAIN", path, kManualStampMax, stamp);
   while (!stamp.empty() && std::isspace(static_cast<unsigned char>(stamp.back()))) stamp.pop_back();
   return stamp;
 }

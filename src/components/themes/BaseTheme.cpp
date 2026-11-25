@@ -345,7 +345,7 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   // strings only need to outlive the fui::header() call that consumes them.
   static char percentText[24];
   static char clockText[10];
-  const bool showClock = metrics.headerShowsClock && SETTINGS.clockShowInHeader && halClock.isAvailable() &&
+  const bool showClock = SETTINGS.clockShowInHeader && halClock.isAvailable() &&
                          halClock.formatTime(clockText, sizeof(clockText), SETTINGS.clockFormat == 1);
   const bool showPercent = SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
   if (HalDisplay::DISPLAY_HEIGHT <= 240) {
@@ -410,10 +410,11 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   }
 
   // The user's setting alone controls the clock; themes cannot hide or center it.
-  static char clockText[10];
   if (SETTINGS.clockShowInHeader && halClock.isAvailable() &&
       halClock.formatTime(clockText, sizeof(clockText), SETTINGS.clockFormat == 1)) {
-    status.clockText = clockText;
+    if (HalDisplay::DISPLAY_HEIGHT > 240) {
+      status.clockText = clockText;
+    }
   }
 }
 

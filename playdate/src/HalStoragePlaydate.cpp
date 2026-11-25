@@ -147,11 +147,8 @@ class HalFile::Impl {
 HalStorage::HalStorage() = default;
 
 bool HalStorage::begin() {
-  initialized = (playdate_hal::pd() != nullptr);
-  return initialized;
+  return playdate_hal::pd() != nullptr;
 }
-
-bool HalStorage::ready() const { return initialized; }
 
 void HalStorage::prepareForDeepSleep() {}
 
@@ -170,21 +167,6 @@ uint64_t HalStorage::sdTotalBytes() { return 4ULL * 1024ULL * 1024ULL * 1024ULL;
 bool HalStorage::sdUsedBytes(uint64_t& usedBytes) {
   usedBytes = 64ULL * 1024ULL * 1024ULL;
   return true;
-}
-
-std::vector<String> HalStorage::listFiles(const char* path, int maxFiles) {
-  std::vector<String> ret;
-  HalFile root = open(path);
-  if (!root || !root.isDirectory()) return ret;
-  int count = 0;
-  char name[256];
-  for (HalFile f = root.openNextFile(); f && count < maxFiles; f = root.openNextFile()) {
-    if (f.isDirectory()) continue;
-    f.getName(name, sizeof(name));
-    ret.push_back(String(name));
-    count++;
-  }
-  return ret;
 }
 
 String HalStorage::readFile(const char* path) {
@@ -213,19 +195,6 @@ bool HalStorage::readFileToStream(const char* path, Print& out, size_t chunkSize
   return true;
 }
 
-size_t HalStorage::readFileToBuffer(const char* path, char* buffer, size_t bufferSize, size_t maxBytes) {
-  if (!buffer || bufferSize == 0) return 0;
-  HalFile f = open(path, O_RDONLY);
-  if (!f || f.isDirectory()) {
-    buffer[0] = '\0';
-    return 0;
-  }
-  const size_t maxToRead = (maxBytes == 0) ? (bufferSize - 1) : std::min(maxBytes, bufferSize - 1);
-  const int r = f.read(buffer, maxToRead);
-  const size_t total = r > 0 ? static_cast<size_t>(r) : 0;
-  buffer[total] = '\0';
-  return total;
-}
 
 bool HalStorage::readFileToString(const char* moduleName, const std::string& path, size_t cap, std::string& out) {
   out.clear();
@@ -403,9 +372,6 @@ bool HalStorage::openFileForRead(const char* moduleName, const std::string& path
   return openFileForRead(moduleName, path.c_str(), file);
 }
 
-bool HalStorage::openFileForRead(const char* moduleName, const String& path, HalFile& file) {
-  return openFileForRead(moduleName, path.c_str(), file);
-}
 
 bool HalStorage::openFileForWrite(const char* moduleName, const char* path, HalFile& file) {
   (void)moduleName;
@@ -607,12 +573,6 @@ size_t HalFile::write(const void* buf, size_t count) { return write(static_cast<
 
 size_t HalFile::write(uint8_t b) { return write(&b, 1); }
 
-bool HalFile::rename(const char* newPath) {
-  if (!impl || !impl->isOpen || !newPath) return false;
-  const std::string oldRel = impl->relPath;
-  impl->close();
-  return Storage.rename(oldRel.c_str(), newPath);
-}
 
 bool HalFile::isDirectory() const { return impl && impl->isOpen && impl->isDir; }
 

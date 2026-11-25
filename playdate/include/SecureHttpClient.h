@@ -74,6 +74,7 @@ class SecureHttpClient {
 
   std::string getHeader(const std::string& headerName) const;
   const std::string* getUniqueHeader(const char* lowercaseName) const;
+  std::string getCombinedHeader(const char* lowercaseName) const;
   std::vector<std::pair<std::string, std::string>> getHeaders() const;
 
   static bool resolveUrl(const std::string& baseUrl, const std::string& location, std::string& resolved);

@@ -6,6 +6,10 @@
 
 InputManager::InputManager() = default;
 
+bool InputManager::isPowerButtonPhysicallyPressed() const {
+  return gpio.isPressed(HalGPIO::BTN_POWER);
+}
+
 HalGPIO gpio;
 
 namespace {

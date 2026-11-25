@@ -454,6 +454,15 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
   return 100;
 }
 
+bool HalPowerManager::readBatteryPercentage(uint16_t& percent) const {
+  if (gPlaydateApi && gPlaydateApi->system && gPlaydateApi->system->getBatteryPercentage) {
+    percent = getBatteryPercentage();
+    return true;
+  }
+  percent = 100;
+  return false;
+}
+
 HalPowerManager::Lock::Lock() {
   if (powerManager.currentLockMode == None) {
     powerManager.currentLockMode = NormalSpeed;
@@ -503,37 +512,21 @@ bool HalClock::localTime(struct tm& out) const {
   return true;
 }
 
-bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
-  struct tm t{};
-  if (!localTime(t)) return false;
-  hour = static_cast<uint8_t>(t.tm_hour);
-  minute = static_cast<uint8_t>(t.tm_min);
-  return true;
-}
-
 bool HalClock::formatTime(char* buf, size_t bufSize, bool use12Hour) const {
-  if (!buf || bufSize == 0) return false;
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  if (!getTime(hour, minute)) {
-    buf[0] = '\0';
+  if (bufSize < (use12Hour ? 9u : 6u)) return false;
+  struct tm local{};
+  if (!localTime(local)) {
+    if (buf && bufSize > 0) buf[0] = '\0';
     return false;
   }
   if (!use12Hour) {
-    if (bufSize < 6) {
-      buf[0] = '\0';
-      return false;
-    }
-    std::snprintf(buf, bufSize, "%02u:%02u", hour, minute);
+    std::snprintf(buf, bufSize, "%02d:%02d", local.tm_hour, local.tm_min);
     return true;
   }
-  if (bufSize < 9) {
-    buf[0] = '\0';
-    return false;
-  }
-  const char* suffix = (hour >= 12) ? "PM" : "AM";
-  const uint8_t hour12 = (hour % 12 == 0) ? 12 : (hour % 12);
-  std::snprintf(buf, bufSize, "%u:%02u %s", hour12, minute, suffix);
+  int hour12 = local.tm_hour % 12;
+  if (hour12 == 0) hour12 = 12;
+  const char* suffix = (local.tm_hour >= 12) ? "PM" : "AM";
+  std::snprintf(buf, bufSize, "%d:%02d %s", hour12, local.tm_min, suffix);
   return true;
 }
 

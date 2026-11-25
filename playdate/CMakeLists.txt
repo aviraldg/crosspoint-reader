@@ -199,6 +199,7 @@ set(ALL_CROSSPOINT_INCLUDES
   "${REPO_ROOT}/lib/Logging"
   "${REPO_ROOT}/lib/Memory"
   "${REPO_ROOT}/lib/MiniBidi"
+  "${REPO_ROOT}/lib/OtShaper"
   "${REPO_ROOT}/lib/PngToBmpConverter"
   "${REPO_ROOT}/lib/Serialization"
   "${REPO_ROOT}/lib/TrustedTime"

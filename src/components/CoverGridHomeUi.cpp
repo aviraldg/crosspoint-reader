@@ -290,6 +290,7 @@ void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
 #endif
       Settings2Icon,
   };
+  int count = 0;
   for (size_t i = 0; i < std::size(ICONS); ++i) {
     if (i == 2 && slotTab == SlotTab::NONE) continue;
     auto& tab = tabItems[count];

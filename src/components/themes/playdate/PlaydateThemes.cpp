@@ -811,7 +811,9 @@ void CrossplayTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const ch
 
 void CrossplayTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                          const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
-                                         bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
+                                         bool& bufferRestored, std::function<bool()> storeCoverBuffer,
+                                         int progress) const {
+  (void)progress;
   (void)rect;
   (void)bufferRestored;
 
@@ -950,7 +952,9 @@ void PlayfulTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char
 
 void PlayfulTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                        const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
-                                       bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
+                                       bool& bufferRestored, std::function<bool()> storeCoverBuffer,
+                                       int progress) const {
+  (void)progress;
   (void)rect;
   (void)bufferRestored;
 

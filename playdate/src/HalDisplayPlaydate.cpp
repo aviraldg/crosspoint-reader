@@ -107,6 +107,8 @@ HalDisplay::Controller HalDisplay::getController() const { return BoardConfig::A
 
 const char* HalDisplay::controllerName() const { return "Playdate Sharp Memory LCD"; }
 
+const char* HalDisplay::panelName() const { return "Sharp LS027B7DH01"; }
+
 void HalDisplay::begin(bool seamless) {
   (void)seamless;
   gStorageLent = false;
@@ -126,12 +128,6 @@ void HalDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uin
   blitImageToFrameBuffer(imageData, x, y, w, h, /*transparent=*/false);
 }
 
-void HalDisplay::drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                                      bool fromProgmem) const {
-  (void)fromProgmem;
-  blitImageToFrameBuffer(imageData, x, y, w, h, /*transparent=*/true);
-}
-
 void HalDisplay::displayBuffer(RefreshMode mode, bool turnOffScreen) {
   (void)mode;
   (void)turnOffScreen;
@@ -149,20 +145,13 @@ HalDisplay::GrayscaleCapabilities HalDisplay::grayscaleCapabilities(GrayscaleMod
   return GrayscaleCapabilities{};
 }
 
-bool HalDisplay::supportsAsyncGrayscaleBase() const { return false; }
-
-void HalDisplay::refreshDisplay(RefreshMode mode, bool turnOffScreen) { displayBuffer(mode, turnOffScreen); }
-
 void HalDisplay::setInverted(bool inverted) { gInverted = inverted; }
-
-bool HalDisplay::toggleInverted() {
-  gInverted = !gInverted;
-  return gInverted;
-}
 
 bool HalDisplay::isInverted() const { return gInverted; }
 
 void HalDisplay::deepSleep() {}
+
+void HalDisplay::controllerIdle() {}
 
 uint8_t* HalDisplay::getFrameBuffer() const { return gActiveFrameBuffer; }
 
@@ -203,11 +192,6 @@ void HalDisplay::preconditionGrayscale(uint16_t x, uint16_t y, uint16_t w, uint1
   (void)h;
 }
 
-void HalDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
-  (void)lsbBuffer;
-  (void)msbBuffer;
-}
-
 void HalDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) { (void)lsbBuffer; }
 
 void HalDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) { (void)msbBuffer; }
@@ -222,10 +206,6 @@ void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, ui
   (void)yStart;
   (void)numRows;
 }
-
-bool HalDisplay::supportsStripGrayscale() const { return false; }
-
-bool HalDisplay::combinesGrayscaleBase() const { return false; }
 
 uint16_t HalDisplay::getDisplayWidth() const { return DISPLAY_WIDTH; }
 
